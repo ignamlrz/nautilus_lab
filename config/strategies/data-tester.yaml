@@ -1,0 +1,10 @@
+actors:
+  - actor_path: nautilus_trader.test_kit.strategies.tester_data:DataTester
+    config_path: nautilus_trader.test_kit.strategies.tester_data:DataTesterConfig
+    config:
+      instrument_ids:
+        - BTCUSDT-PERP.BINANCE_FUTURES
+      bar_types:
+        - BTCUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
+      subscribe_bars: true
+      request_bars: true

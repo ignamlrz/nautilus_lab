@@ -1,0 +1,78 @@
+type: backtest
+server:
+  enabled: true
+  port: 8080
+config:
+  start: "2025-01-01"
+  end: "2025-01-01T01:00:00"
+  # backtest engine configuration
+  engine:
+    config_path: nautilus_trader.backtest.config:BacktestEngineConfig
+    config:
+      trader_id: TESTER-0001
+      logging:
+        config_path: nautilus_trader.config:LoggingConfig
+        config:
+          log_level: INFO
+          log_component_levels:
+            Portfolio: INFO
+      catalogs:
+        - config_path: nautilus_trader.persistence.config:DataCatalogConfig
+          config:
+            path: /shared/catalog/nautilus-data
+      data_engine:
+        config_path: nautilus_trader.config:DataEngineConfig
+        config:
+          time_bars_origin_offset:
+            MINUTE: 0
+          time_bars_build_delay: 0
+      cache:
+        config_path: nautilus_trader.config:CacheConfig
+        config: {
+          bar_capacity: 50000
+        }
+  # backtest venue config
+  venues:
+    - config_path: nautilus_trader.backtest.config:BacktestVenueConfig
+      config:
+        name: BINANCE_FUTURES
+        oms_type: HEDGING
+        account_type: MARGIN
+        base_currency: USDT
+        starting_balances:
+          - 1000000 USDT
+        # liquidation venue: https://github.com/nautechsystems/nautilus_trader/pull/4077
+        # liquidation_enabled: true          # default False — zero impact on existing backtests
+        # liquidation_trigger_ratio: "0.90"  # liquidate when 90 % of margin is consumed
+        # liquidation_cancel_open_orders: true        # cancel resting orders first
+  # backtest data config
+  data:
+    - config_path: nautilus_trader.backtest.config:BacktestDataConfig
+      config:
+        catalog_path: /shared/catalog/nautilus-data
+        data_cls: nautilus_trader.model.data:Bar
+        instrument_ids:
+          - BTCUSDT-PERP.BINANCE_FUTURES
+          - DOGEUSDT-PERP.BINANCE_FUTURES
+          - ETHUSDT-PERP.BINANCE_FUTURES
+          - LTCUSDT-PERP.BINANCE_FUTURES
+          - SOLUSDT-PERP.BINANCE_FUTURES
+          - SUIUSDT-PERP.BINANCE_FUTURES
+          - TRXUSDT-PERP.BINANCE_FUTURES
+          - XRPUSDT-PERP.BINANCE_FUTURES
+        bar_spec: "1-MINUTE-LAST"
+        optimize_file_loading: True
+    - config_path: nautilus_trader.backtest.config:BacktestDataConfig
+      config:
+        catalog_path: /shared/catalog/nautilus-data
+        data_cls: nautilus_trader.model.data:FundingRateUpdate
+        instrument_ids:
+          - BTCUSDT-PERP.BINANCE_FUTURES
+          - DOGEUSDT-PERP.BINANCE_FUTURES
+          - ETHUSDT-PERP.BINANCE_FUTURES
+          - LTCUSDT-PERP.BINANCE_FUTURES
+          - SOLUSDT-PERP.BINANCE_FUTURES
+          - SUIUSDT-PERP.BINANCE_FUTURES
+          - TRXUSDT-PERP.BINANCE_FUTURES
+          - XRPUSDT-PERP.BINANCE_FUTURES
+        optimize_file_loading: True

@@ -1,0 +1,54 @@
+# Pre-commit hooks for trading_bots.
+#
+# Install once:
+#     uv tool install pre-commit     # or: pip install pre-commit
+#     pre-commit install             # wires the hook into .git/hooks
+#
+# Then every ``git commit`` will run all hooks; the commit is blocked if any
+# hook fails. Hooks that can auto-fix (ruff check --fix, ruff format) modify
+# the files in place and re-stage them; the commit then succeeds on the
+# second try.
+#
+# Run manually on the whole repo:
+#     pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # Loading YAML that uses !!python/ tags is fine in our configs.
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.15
+    hooks:
+      # Lint + auto-fix everything that can be fixed in place.
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+
+      # Format after the linter has had a chance to reorder imports.
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      # mypy is slow, so only run it on push via ``pre-commit push`` if you
+      # want. For now we run it on every commit but skip the slow parts.
+      - id: mypy
+        args: [--no-incremental, --config-file=pyproject.toml]
+        additional_dependencies: [pydantic, pyyaml]
+        # Don't fail the commit on type errors - they're informational. Remove
+        # the next line to block commits on type errors instead.
+        stages: [manual]
+        # Uncomment to require types pass before committing:
+        # stages: [pre-commit]

@@ -1,0 +1,27 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Backtest",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": ["-c", "${workspaceFolder}/config/system/backtest.yaml", "-s", "${workspaceFolder}/config/strategies/data-tester.yaml"],
+            "justMyCode": false
+        },
+        {
+            "name": "Live PaperTrading",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "args": ["-c", "${workspaceFolder}/config/system/binance-paper-trading.yaml", "-s", "${workspaceFolder}/config/strategies/data-tester.yaml"],
+            "justMyCode": false
+        }
+    ]
+}

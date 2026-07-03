@@ -1,0 +1,79 @@
+type: live
+server:
+  enabled: true
+  port: 8080
+config:
+  trader_id: TESTER-0001
+  # data clients config
+  data_clients:
+    - factory_path: nautilus_trader.adapters.binance.factories:BinanceLiveDataClientFactory
+      config_path: nautilus_trader.adapters.binance.config:BinanceDataClientConfig
+      config:
+        venue: BINANCE_FUTURES
+        account_type: USDT_FUTURES
+        environment: LIVE
+        us: false
+        instrument_provider:
+          config_path: nautilus_trader.config:InstrumentProviderConfig
+          config:
+            # load_all: true
+            load_ids: ["BTCUSDT-PERP.BINANCE_FUTURES", "XRPUSDT-PERP.BINANCE_FUTURES", "SOLUSDT-PERP.BINANCE_FUTURES", "XAUUSDT-PERP.BINANCE_FUTURES", "XAGUSDT-PERP.BINANCE_FUTURES", "COPPERUSDT-PERP.BINANCE_FUTURES"]
+    - factory_path: nautilus_trader.adapters.binance.factories:BinanceLiveDataClientFactory
+      config_path: nautilus_trader.adapters.binance.config:BinanceDataClientConfig
+      config:
+        venue: BINANCE_SPOT
+        account_type: SPOT
+        environment: LIVE
+        us: false
+        instrument_provider:
+          config_path: nautilus_trader.config:InstrumentProviderConfig
+          config:
+            # load_all: true
+            load_ids: ["BTCUSDT.BINANCE_SPOT"]
+  # exec clients config
+  exec_clients:
+    - factory_path: nautilus_trader.adapters.sandbox.factory:SandboxLiveExecClientFactory
+      config_path: nautilus_trader.adapters.sandbox.config:SandboxExecutionClientConfig
+      config:
+        # account_id: TESTER-0001
+        venue: BINANCE_FUTURES
+        account_type: MARGIN
+        starting_balances:
+          - 1000 USDT
+    - factory_path: nautilus_trader.adapters.sandbox.factory:SandboxLiveExecClientFactory
+      config_path: nautilus_trader.adapters.sandbox.config:SandboxExecutionClientConfig
+      config:
+        # account_id: TESTER-0002
+        venue: BINANCE_SPOT
+        account_type: CASH
+        starting_balances:
+          - 1000 USDT
+          - 0.1 BTC
+  # logging config
+  logging:
+    config_path: nautilus_trader.config:LoggingConfig
+    config:
+      log_level: INFO
+      log_component_levels:
+        TradingNode: INFO
+        Portfolio: INFO
+        APIMonitorActor: INFO
+  # exec engine config
+  exec_engine:
+    config_path: nautilus_trader.config:LiveExecEngineConfig
+    config:
+      reconciliation: true
+      reconciliation_lookback_mins: 1440
+      filter_position_reports: true
+  # cache config
+  cache:
+    config_path: nautilus_trader.config:CacheConfig
+    config:
+      timestamps_as_iso8601: true
+      flush_on_start: false
+  # additional trader config
+  timeout_connection: 30
+  timeout_reconciliation: 2
+  timeout_portfolio: 2
+  timeout_disconnection: 2
+  timeout_post_stop: 2
