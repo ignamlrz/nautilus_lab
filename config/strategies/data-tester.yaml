@@ -4,7 +4,14 @@ actors:
     config:
       instrument_ids:
         - BTCUSDT-PERP.BINANCE_FUTURES
+        - ETHUSDT-PERP.BINANCE_FUTURES
+        - XRPUSDT-PERP.BINANCE_FUTURES
+        - SOLUSDT-PERP.BINANCE_FUTURES
       bar_types:
         - BTCUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
+        - ETHUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
+        - XRPUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
+        - SOLUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
       subscribe_bars: true
       request_bars: true
+      requests_start_delta: 5d

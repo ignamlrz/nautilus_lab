@@ -17,7 +17,7 @@ config:
           config_path: nautilus_trader.config:InstrumentProviderConfig
           config:
             # load_all: true
-            load_ids: ["BTCUSDT-PERP.BINANCE_FUTURES", "XRPUSDT-PERP.BINANCE_FUTURES", "SOLUSDT-PERP.BINANCE_FUTURES", "XAUUSDT-PERP.BINANCE_FUTURES", "XAGUSDT-PERP.BINANCE_FUTURES", "COPPERUSDT-PERP.BINANCE_FUTURES"]
+            load_ids: ["BTCUSDT-PERP.BINANCE_FUTURES", "ETHUSDT-PERP.BINANCE_FUTURES", "XRPUSDT-PERP.BINANCE_FUTURES", "SOLUSDT-PERP.BINANCE_FUTURES", "XAUUSDT-PERP.BINANCE_FUTURES", "XAGUSDT-PERP.BINANCE_FUTURES", "COPPERUSDT-PERP.BINANCE_FUTURES"]
     - factory_path: nautilus_trader.adapters.binance.factories:BinanceLiveDataClientFactory
       config_path: nautilus_trader.adapters.binance.config:BinanceDataClientConfig
       config:
