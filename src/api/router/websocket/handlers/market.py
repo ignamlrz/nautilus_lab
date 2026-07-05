@@ -19,7 +19,7 @@ class MinitickerWebsocketHandler(BaseRouter):
         self.handler = handler
         self._subs: dict[str, InstrumentId] = {}
 
-    async def subscribe(self, topic: str, client: web.WebSocketResponse):
+    def subscribe(self, topic: str, client: web.WebSocketResponse):
         if topic in self._subs or not self.is_live:
             return
         instrument_id, _ = tuple(topic.split("@"))
@@ -28,15 +28,15 @@ class MinitickerWebsocketHandler(BaseRouter):
             topic, interval=timedelta(seconds=1), callback=self.on_miniticker_timer
         )
         self._subs[topic] = instrument_id
-        await self.handler.subscribe(
+        self.handler.subscribe(
             f"{str(instrument_id).lower()}@tradeTick", client, source=self.__class__.__name__
         )
 
-    async def unsubscribe(self, topic: str, client: web.WebSocketResponse):
+    def unsubscribe(self, topic: str, client: web.WebSocketResponse):
         if topic not in self._subs or not self.is_live:
             return
 
-        await self.handler.unsubscribe(
+        self.handler.unsubscribe(
             f"{str(self._subs[topic]).lower()}@tradeTick", client, source=self.__class__.__name__
         )
         self.clock.cancel_timer(topic)

@@ -14,4 +14,4 @@ actors:
         - SOLUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
       subscribe_bars: true
       request_bars: true
-      requests_start_delta: 5d
+      requests_start_delta: 15m

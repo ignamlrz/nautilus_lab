@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -25,6 +26,8 @@ class WebsocketManager(BaseRouter):
         self._topics: dict[str, set[TopicSubscription]] = {}
         self.handler: WebsocketHandler | None = None
 
+        self._is_initialized = False
+
     def register_handler(self, handler: WebsocketHandler):
         self.handler = handler
 
@@ -34,14 +37,20 @@ class WebsocketManager(BaseRouter):
 
         self._clients.add(ws)
         self.log.info(f"Client connected ({len(self._clients)} total)")
+
+        if not self._is_initialized:
+            self._is_initialized = True
+            self.clock.set_timer(
+                "clear_clients", interval=timedelta(minutes=1), callback=self.clear_clients
+            )
         return ws
 
-    async def disconnect(self, client: web.WebSocketResponse):
+    def disconnect(self, client: web.WebSocketResponse):
         for topic in set(self._topics.keys()):
-            for sub in self._topics[topic]:
+            for sub in self._topics[topic].copy():
                 if sub.client == client:
                     if self.handler:
-                        await self.handler.unsubscribe(topic, client, source=sub.source)
+                        self.handler.unsubscribe(topic, client, source=sub.source)
                     else:
                         self.unsubscribe(topic, client, source=sub.source)
         self._clients.discard(client)
@@ -75,6 +84,11 @@ class WebsocketManager(BaseRouter):
 
     def publish(self, topic: str, message: dict):
         self.loop.call_soon_threadsafe(self._queue.put_nowait, (topic, message))
+
+    def clear_clients(self, event):
+        for client in set(self._clients):
+            if client.closed:
+                self.disconnect(client)
 
     async def consumer_task(self):
         try:

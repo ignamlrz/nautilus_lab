@@ -29,5 +29,5 @@ class WebsocketRouter(BaseRouter):
                     self.error(f"WebSocket error: {ws.exception()}")
                     break
         finally:
-            await self.manager.disconnect(ws)
+            self.manager.disconnect(ws)
         return ws

@@ -29,21 +29,21 @@ class WebsocketHandler(BaseRouter):
             case "SUBSCRIBE":
                 params = self._extract_params(data)
                 for topic in params:
-                    await self.subscribe(topic, ws, source=self.__class__.__name__)
+                    self.subscribe(topic, ws, source=self.__class__.__name__)
             case "UNSUBSCRIBE":
                 params = self._extract_params(data)
                 for topic in params:
-                    await self.unsubscribe(topic, ws, source=self.__class__.__name__)
+                    self.unsubscribe(topic, ws, source=self.__class__.__name__)
 
-    async def subscribe(self, topic: str, client: web.WebSocketResponse, source: str):
+    def subscribe(self, topic: str, client: web.WebSocketResponse, source: str):
         type_sub = self._extract_type_sub(topic)
         if type_sub in self.handlers and self.manager.subscribe(topic, client, source):
-            await self.handlers[type_sub].subscribe(topic, client)
+            self.handlers[type_sub].subscribe(topic, client)
 
-    async def unsubscribe(self, topic: str, client: web.WebSocketResponse, source: str):
+    def unsubscribe(self, topic: str, client: web.WebSocketResponse, source: str):
         type_sub = self._extract_type_sub(topic)
         if type_sub in self.handlers and self.manager.unsubscribe(topic, client, source):
-            await self.handlers[type_sub].unsubscribe(topic, client)
+            self.handlers[type_sub].unsubscribe(topic, client)
 
     def publish(self, topic: str, message: dict):
         self.manager.publish(topic, message)
