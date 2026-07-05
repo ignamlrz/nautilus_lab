@@ -6,6 +6,9 @@ from nautilus_trader.common.component import TestClock
 from nautilus_trader.data.aggregation import TimeBarAggregator
 from nautilus_trader.model import BarSpecification
 from nautilus_trader.model import BarType
+from nautilus_trader.model.enums import PriceType
+from nautilus_trader.model.enums import aggregation_source_to_str
+from nautilus_trader.model.enums import bar_aggregation_to_str
 from nautilus_trader.model.identifiers import InstrumentId
 
 from src.api.keys import LOOP_KEY
@@ -23,6 +26,14 @@ ALLOWED_TIMEFRAME_TO_BAR_SPEC = {
 }
 
 ALLOWED_BAR_SPEC_TO_TIMEFRAME = {v: k for k, v in ALLOWED_TIMEFRAME_TO_BAR_SPEC.items()}
+
+LOOKUP_BARS = {
+    timedelta(minutes=5): BarSpecification.from_timedelta(timedelta(seconds=1), PriceType.LAST),
+    timedelta(hours=12): BarSpecification.from_timedelta(timedelta(minutes=1), PriceType.LAST),
+    timedelta(days=7): BarSpecification.from_timedelta(timedelta(minutes=15), PriceType.LAST),
+    timedelta(days=31 * 3): BarSpecification.from_timedelta(timedelta(hours=4), PriceType.LAST),
+    timedelta(days=365 * 100): BarSpecification.from_timedelta(timedelta(days=1), PriceType.LAST),
+}
 
 
 class BaseRouter:
@@ -86,11 +97,36 @@ class BaseRouter:
             raise web.HTTPNotFound(text=f"bar_spec '{bar_spec}' was not found on allowed bar_types")
         return timeframe
 
-    def find_bar_type(self, instrument_id: InstrumentId, bar_spec: BarSpecification):
+    def find_bar_type(
+        self, instrument_id: InstrumentId, bar_spec: BarSpecification, real_time: bool = False
+    ) -> BarType:
         """Find a Nautilus :class:`BarType` for a given instrument and bar specification."""
+        if isinstance(bar_spec, str):
+            bar_spec = self.timeframe_to_bar_spec(bar_spec)
         bar_types = self.cache.bar_types(instrument_id=instrument_id)
         for bar_type in bar_types:
             if bar_type.spec == bar_spec:
+                return bar_type
+
+        bar_type_aggregated = self.lookup_bar_type(
+            BarType(instrument_id=instrument_id, bar_spec=bar_spec), real_time=real_time
+        )
+        if bar_type_aggregated:
+            spec_aggregated = bar_type_aggregated.spec
+            return BarType.from_str(
+                f"{instrument_id}-{bar_spec}-INTERNAL@{spec_aggregated.step}-{bar_aggregation_to_str(spec_aggregated.aggregation)}-{aggregation_source_to_str(bar_type_aggregated.aggregation_source)}"
+            )
+        return BarType.from_str(f"{instrument_id}-{bar_spec}-INTERNAL")
+
+    def lookup_bar_type(self, current: BarType, real_time: bool = False) -> BarType | None:
+        for max_td, bar_spec in LOOKUP_BARS.items():
+            if not real_time and bar_spec.timedelta < timedelta(minutes=1):
+                continue
+            if current.spec.timedelta <= max_td:
+                if bar_spec.timedelta < timedelta(minutes=1):
+                    bar_type = BarType.from_str(f"{current.instrument_id}-{bar_spec}-INTERNAL")
+                else:
+                    bar_type = BarType.from_str(f"{current.instrument_id}-{bar_spec}-EXTERNAL")
                 return bar_type
         return None
 
@@ -108,7 +144,7 @@ class BaseRouter:
         limit = limit or 500
         # find bar type
         bar_type = self.find_bar_type(instrument_id=instrument_id, bar_spec=bar_spec)
-        if bar_type:
+        if bar_type.is_externally_aggregated():
             # filter cache bars by before date and then apply limit
             bars = [b for b in self.cache.bars(bar_type=bar_type) if start <= b.ts_event < end][
                 :limit
@@ -116,7 +152,9 @@ class BaseRouter:
 
             # order by open_time ascending
             bars.sort(key=lambda b: b.ts_event)
-        elif not bar_type and bar_spec.timedelta > timedelta(minutes=1):
+        elif bar_type.is_composite() and bar_type.composite().spec.timedelta == timedelta(
+            minutes=1
+        ):
             # try aggregate with 1m bars if the requested bar type is not found and the interval is greater than 1 minute
             bar_spec_1m = self.timeframe_to_bar_spec("1m")
             bar_type_1m = self.find_bar_type(instrument_id=instrument_id, bar_spec=bar_spec_1m)

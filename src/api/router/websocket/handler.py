@@ -1,11 +1,11 @@
 from aiohttp import web
 
 from src.api.router.base import BaseRouter
+from src.api.router.websocket.handlers.bars import BarsWebsocketHandler
 
-# from src.api.router.websocket.handlers.bar import BarsWebsocketHandler
 # from src.api.router.websocket.handlers.drawing import DrawingWebsocketHandler
-# from src.api.router.websocket.handlers.miniticker import MinitickerWebsocketHandler
-from src.api.router.websocket.handlers.market import MinitickerWebsocketHandler
+from src.api.router.websocket.handlers.miniticker import MinitickerWebsocketHandler
+from src.api.router.websocket.handlers.tradeticks import TradeTicksWebsocketHandler
 from src.api.router.websocket.manager import WebsocketManager
 
 
@@ -15,12 +15,17 @@ class WebsocketHandler(BaseRouter):
         self.manager = manager
         self.handlers = {
             "miniTicker": MinitickerWebsocketHandler(app, self),
-            # "kline": BarsWebsocketHandler(app, self),
-            # "tradeTick": TradeTicksWebsocketHandler(app, self),
+            "kline": BarsWebsocketHandler(app, self),
+            "tradeTick": TradeTicksWebsocketHandler(app, self),
             # "drawing": DrawingWebsocketHandler(app, self)
         }
+        self._initialized = False
 
     async def dispatch(self, ws: web.WebSocketResponse, data: dict):
+        if not self._initialized:
+            self._initialized = True
+            self.agent.on_bar = self.handlers["kline"].on_bar
+
         if "method" not in data:
             return
         method = data["method"]

@@ -46,8 +46,8 @@ class WebsocketManager(BaseRouter):
         return ws
 
     def disconnect(self, client: web.WebSocketResponse):
-        for topic in set(self._topics.keys()):
-            for sub in self._topics[topic].copy():
+        for topic in list(self._topics.keys()):
+            for sub in list(self._topics.get(topic, [])):
                 if sub.client == client:
                     if self.handler:
                         self.handler.unsubscribe(topic, client, source=sub.source)
@@ -86,7 +86,11 @@ class WebsocketManager(BaseRouter):
         self.loop.call_soon_threadsafe(self._queue.put_nowait, (topic, message))
 
     def clear_clients(self, event):
-        for client in set(self._clients):
+        self.loop.call_soon_threadsafe(self._clear_clients_in_loop)
+
+    def _clear_clients_in_loop(self):
+        # Ahora estamos en el hilo del loop aiohttp: un solo thread → no race.
+        for client in list(self._clients):  # list() snapshot
             if client.closed:
                 self.disconnect(client)
 
@@ -97,17 +101,21 @@ class WebsocketManager(BaseRouter):
                     topic, message = await self._queue.get()
                     self.log.debug(f"Received message from topic {topic}")
 
-                    subs = self._topics.get(topic, [])
+                    subs = list(self._topics.get(topic, []))
                     clients = set([sub.client for sub in subs])
+                    clients_to_disconnect = []
                     for client in clients:
                         try:
                             await client.send_json(message)
                         except Exception as e:
-                            self.log.error(str(e))
+                            self.log.error("Error when sending message to client: " + str(e))
                             if isinstance(e, ConnectionResetError):
-                                await self.disconnect(client)
+                                clients_to_disconnect.append(client)
+                    for client in clients_to_disconnect:
+                        if client in self._clients:
+                            self.disconnect(client)
                 except Exception as e:
-                    self.log.error(str(e))
+                    self.log.error("Error in consumer task: " + str(e))
                 self._queue.task_done()
         except asyncio.CancelledError:
             return
