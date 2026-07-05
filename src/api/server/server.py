@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from src.api.keys import LOOP_KEY
 from src.api.webapp import app
 
 
@@ -139,9 +140,10 @@ class Server:
         """Entry point of the daemon thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        # from .app import loop as loop_key
 
-        # app[loop_key] = self._loop
+        app[LOOP_KEY] = self._loop
+        for subapp in app._subapps:
+            subapp[LOOP_KEY] = self._loop
         try:
             self._loop.run_until_complete(self._serve())
         finally:
@@ -153,9 +155,9 @@ class Server:
         self._loop_stop = asyncio.Event()
         self._runner = web.AppRunner(app, access_log=None)
         # TO ENHANCE: we are creating task for read websocket queue
-        # from .app import ws_router
+        from src.api.router.websocket import websocket
 
-        # consumer_task = asyncio.create_task(ws_router.manager.consumer_task())
+        consumer_task = asyncio.create_task(websocket.manager.consumer_task())
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._config.host, self._config.port)
         try:
@@ -173,7 +175,6 @@ class Server:
         try:
             await self._loop_stop.wait()
         finally:
-            # consumer_task.cancel()
-            # await asyncio.gather(consumer_task, self._runner.cleanup())
-            await self._runner.cleanup()
+            consumer_task.cancel()
+            await asyncio.gather(consumer_task, self._runner.cleanup())
             self._runner = None

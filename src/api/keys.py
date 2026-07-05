@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -14,3 +15,4 @@ else:
 
 
 NAUTILUS_TRADER_KEY = web.AppKey("nautilus_trader", NautilusTraderApp)
+LOOP_KEY = web.AppKey("loop", asyncio.AbstractEventLoop)

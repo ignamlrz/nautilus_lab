@@ -8,6 +8,7 @@ from nautilus_trader.model import BarSpecification
 from nautilus_trader.model import BarType
 from nautilus_trader.model.identifiers import InstrumentId
 
+from src.api.keys import LOOP_KEY
 from src.api.keys import NAUTILUS_TRADER_KEY
 
 
@@ -31,6 +32,10 @@ class BaseRouter:
     @property
     def nautilus_app(self):
         return self.app[NAUTILUS_TRADER_KEY]
+
+    @property
+    def loop(self):
+        return self.app[LOOP_KEY]
 
     @property
     def kernel(self):
