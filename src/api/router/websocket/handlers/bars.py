@@ -1,14 +1,12 @@
 from dataclasses import dataclass
-from dataclasses import field
 from typing import TYPE_CHECKING
 
 from aiohttp import web
-from nautilus_trader.core import UUID4
-from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.data.aggregation import BarBuilder
 from nautilus_trader.model import Bar
 from nautilus_trader.model import BarSpecification
 from nautilus_trader.model import BarType
+from nautilus_trader.model import Quantity
 from nautilus_trader.model.enums import AggregationSource
 from nautilus_trader.model.identifiers import InstrumentId
 
@@ -23,11 +21,7 @@ if TYPE_CHECKING:
 class BarState:
     topic: str
     bar_builder: BarBuilder
-    lookup_bar_type: BarType
     next_bar: int
-    start: int | None = None
-    pending_bars: list[Bar] = field(default_factory=list)
-    uuid: UUID4 | None = None
 
 
 class BarsWebsocketHandler(BaseRouter):
@@ -52,38 +46,18 @@ class BarsWebsocketHandler(BaseRouter):
             f"{str(instrument_id).lower()}@drawing", client, source=self.__class__.__name__
         )
 
-        # lookup bar type and request bars if needed
-        lookup_bar_type = self.lookup_bar_type(bar_type, real_time=True)
-        if lookup_bar_type is None:
-            self.log.warning(f"Bar type {bar_type} not found for instrument {instrument_id}")
-            return
-
         current_ns = self.clock.timestamp_ns()
         diff = current_ns % bar_type.spec.timedelta.value
         start = current_ns - diff
-        uuid = None
-        last_bar = self.cache.bar(lookup_bar_type)
-        if (
-            not last_bar
-            or last_bar.ts_event + bar_type.spec.timedelta.value < self.clock.timestamp_ns()
-        ):
-            request_start = start - (bar_type.spec.timedelta.value * 1000)  # request 1000 bars back
-            if lookup_bar_type.is_internally_aggregated():
-                uuid = self.agent.request_aggregated_bars(
-                    [lookup_bar_type], start=unix_nanos_to_dt(request_start)
-                )
-            else:
-                uuid = self.agent.request_bars(
-                    lookup_bar_type, start=unix_nanos_to_dt(request_start)
-                )
 
         instrument = self.cache.instrument(instrument_id)
+        bar_builder = BarBuilder(instrument, bar_type)
+        bars = self.bars(instrument_id, bar_type.spec, limit=1)
+        if bars:
+            bar_builder.update(bars[0].close, Quantity.zero(), self.clock.timestamp_ns())
         self._subs[instrument_id][bar_type] = BarState(
-            bar_builder=BarBuilder(instrument, bar_type),
+            bar_builder=bar_builder,
             topic=topic,
-            uuid=uuid,
-            lookup_bar_type=lookup_bar_type,
-            start=start,
             next_bar=start + bar_type.spec.timedelta.value,
         )
         if len(self._subs[instrument_id]) == 1:
@@ -119,30 +93,15 @@ class BarsWebsocketHandler(BaseRouter):
         for bt in self._subs[id].copy():
             state = self._subs[id][bt]
             bar_builder = state.bar_builder
-            topic = state.topic
-            if not bar_builder.initialized:
-                if not self.agent.is_pending_request(state.uuid):
-                    bars = [
-                        b
-                        for b in self.cache.bars(state.lookup_bar_type)
-                        if b.ts_event >= state.start
-                    ]
-                    bars.sort(key=lambda b: b.ts_event)
-                    self.log.info(f"Initializing bar builder for {topic} with {len(bars)} bars")
-                    for b in bars:
-                        bar_builder.update_bar(b, b.volume, b.ts_init)
-                    for p in state.pending_bars:
-                        bar_builder.update_bar(p, p.volume, p.ts_init)
-                    state.pending_bars.clear()
-                else:
-                    state.pending_bars.append(bar)
-                    continue
             is_closed = False
             b = None
             current_diff = bar.ts_event % self.bar_spec_sub.timedelta.value
             current_open_time = bar.ts_event - current_diff
             if current_open_time < state.next_bar:
-                if bar_builder.initialized:
+                if not bar_builder.initialized:
+                    bar_builder.update_bar(bar, bar.volume, bar.ts_init)
+                    b = bar_builder.build_now()
+                else:
                     b = bar_builder.build_now()
                     bar_builder.update_bar(b, b.volume, b.ts_init)
                 bar_builder.update_bar(bar, bar.volume, bar.ts_init)
@@ -158,7 +117,7 @@ class BarsWebsocketHandler(BaseRouter):
                 continue
             close_time = b.ts_event
             msg = {
-                "stream": topic,
+                "stream": state.topic,
                 "data": {
                     "e": "kline",
                     "E": close_time // 1_000_000,
@@ -177,4 +136,4 @@ class BarsWebsocketHandler(BaseRouter):
                     },
                 },
             }
-            self.handler.publish(topic, msg)
+            self.handler.publish(state.topic, msg)
