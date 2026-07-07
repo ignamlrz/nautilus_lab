@@ -6,7 +6,11 @@ actors:
         - BTCUSDT-PERP.BINANCE_FUTURES
         - ETHUSDT-PERP.BINANCE_FUTURES
         - XRPUSDT-PERP.BINANCE_FUTURES
-        # - SOLUSDT-PERP.BINANCE_FUTURES
+        - SOLUSDT-PERP.BINANCE_FUTURES
+        - BNBUSDT-PERP.BINANCE_FUTURES
+        - DOGEUSDT-PERP.BINANCE_FUTURES
+        - XAUUSDT-PERP.BINANCE_FUTURES
+        - XAGUSDT-PERP.BINANCE_FUTURES
       # order book
       subscribe_book_at_interval: true
       subscribe_trades: true

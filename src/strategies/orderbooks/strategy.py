@@ -6,7 +6,12 @@ from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.common.config import PositiveInt
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core import nautilus_pyo3
+from nautilus_trader.indicators import AverageTrueRange
+from nautilus_trader.indicators import SimpleMovingAverage
+from nautilus_trader.indicators import VolumeWeightedAveragePrice
+from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import OrderBookDeltas
@@ -68,6 +73,9 @@ class OrderBookSpoofingDetector(Actor):
         super().__init__(config)
 
         self._books: dict[InstrumentId, OrderBook] = {}
+        self._atr: dict[InstrumentId, AverageTrueRange] = {}
+        self._vwap: dict[InstrumentId, VolumeWeightedAveragePrice] = {}
+        self._ema_volume: dict[InstrumentId, SimpleMovingAverage] = {}
 
     def on_start(self) -> None:  # noqa: C901 (too complex)
         """
@@ -93,6 +101,8 @@ class OrderBookSpoofingDetector(Actor):
                 )
 
         for instrument_id in self.config.instrument_ids or []:
+            self.setup_indicators(instrument_id)
+
             if self.config.subscribe_instrument:
                 self.subscribe_instrument(instrument_id)
 
@@ -197,6 +207,25 @@ class OrderBookSpoofingDetector(Actor):
         book_type: nautilus_pyo3.BookType = nautilus_pyo3.BookType.L2_MBP
         pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(instrument_id.value)
         self._books[pyo3_instrument_id] = nautilus_pyo3.OrderBook(pyo3_instrument_id, book_type)
+
+    def setup_indicators(self, instrument_id: InstrumentId) -> None:
+        self._vwap[instrument_id] = vwap = VolumeWeightedAveragePrice()
+        self._atr[instrument_id] = atr = AverageTrueRange(
+            period=14, ma_type=MovingAverageType.WILDER
+        )
+        self._ema_volume[instrument_id] = SimpleMovingAverage(period=50)
+        bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
+        self.register_indicator_for_bars(bar_type, vwap)
+        self.register_indicator_for_bars(bar_type, atr)
+        self.request_bars(
+            bar_type=bar_type,
+            start=self.clock.utc_now() - pd.Timedelta(minutes=1440),
+            client_id=self.config.client_id,
+        )
+        self.subscribe_bars(
+            bar_type=bar_type,
+            client_id=self.config.client_id,
+        )
 
     def on_stop(self) -> None:  # noqa: C901 (too complex)
         """
@@ -339,30 +368,91 @@ class OrderBookSpoofingDetector(Actor):
             return
         midpoint = book.midpoint()
         diff_price = midpoint * 0.00015
+        ema = self._ema_volume[trade.instrument_id]
+        ema.update_raw(trade.size.as_double())
+        if not ema.initialized:
+            return
         if trade.aggressor_side == AggressorSide.BUYER:
             top_price = instrument.make_price(midpoint + diff_price)
             signal_size = book.get_quantity_for_price(top_price, OrderSide.BUY)
         else:
             bottom_price = instrument.make_price(midpoint - diff_price)
             signal_size = book.get_quantity_for_price(bottom_price, OrderSide.SELL)
-        if trade.size > signal_size:
+        if signal_size < ema.value:
+            return
+        if signal_size and trade.size > signal_size:
+            r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
+            r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
+            r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
+            vwap = self._vwap[trade.instrument_id].value
+            atr = self._atr[trade.instrument_id].value
+            bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
+            big_candle_found = None
+            for i in range(15):
+                bar = self.cache.bar(bar_type, i)
+                diff = bar.close - bar.open
+                if atr and abs(diff.as_double()) > atr:
+                    big_candle_found = bar
+                    break
             self.log.info(
-                f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: {trade.size} @ {trade.price} | signal_size was {signal_size}",
+                f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: {trade.size} @ {trade.price} (> {signal_size * midpoint:.2f}$) ({s1.name}, {s2.name}, {s3.name}) | VWAP: {vwap}",
                 LogColor.NORMAL,
             )
-            r1 = self.get_book_order_ratio(book, instrument, diff=0.015)
-            r2 = self.get_book_order_ratio(book, instrument, diff=0.07)
-            r3 = self.get_book_order_ratio(book, instrument, diff=0.33)
-            if r1 is not None and r2 is not None and r3 is not None:
-                if r1 < 0.475 and r2 < 0.475 and r3 < 0.475:
-                    self.log.info(f"{trade.instrument_id} -> [Buy Signal Detected]", LogColor.GREEN)
-                elif r1 > 0.525 and r2 > 0.525 and r3 > 0.525:
-                    self.log.info(f"{trade.instrument_id} -> [Sell Signal Detected]", LogColor.RED)
+            # Bull/Bear trap signal
+            if (
+                trade.aggressor_side == AggressorSide.BUYER
+                and s3 == OrderSide.SELL
+                and (
+                    (s2 == OrderSide.SELL and s1 != OrderSide.SELL)
+                    or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE)
+                )
+                and big_candle_found
+                and big_candle_found.close > big_candle_found.open
+            ):
+                self.log.info(
+                    f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                    LogColor.RED,
+                )
+            elif (
+                trade.aggressor_side == AggressorSide.SELLER
+                and s3 == OrderSide.BUY
+                and (
+                    (s2 == OrderSide.BUY and s1 != OrderSide.BUY)
+                    or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE)
+                )
+                and big_candle_found
+                and big_candle_found.close < big_candle_found.open
+            ):
+                self.log.info(
+                    f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                    LogColor.GREEN,
+                )
+            # Continue trend signal
+            if (
+                trade.aggressor_side == AggressorSide.BUYER
+                and s3 == OrderSide.BUY
+                and s2 == OrderSide.SELL
+                and s1 == OrderSide.BUY
+            ):
+                self.log.info(
+                    f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                    LogColor.GREEN,
+                )
+            elif (
+                trade.aggressor_side == AggressorSide.SELLER
+                and s3 == OrderSide.SELL
+                and s2 == OrderSide.BUY
+                and s1 == OrderSide.SELL
+            ):
+                self.log.info(
+                    f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                    LogColor.RED,
+                )
 
     # generate method get the relation_qty given a float (for example 0.015) and make a log like this quantity given 0.015 - Botton Qty: 100 @ 100.0 | Top Qty: 200 @ 101.0
     def get_book_order_ratio(
         self, book: OrderBook, instrument: Instrument, diff: float = 0.01
-    ) -> float | None:
+    ) -> tuple[float | None, OrderSide]:
         midpoint = book.midpoint()
         if not midpoint:
             return None
@@ -380,20 +470,12 @@ class OrderBookSpoofingDetector(Actor):
         total_money = botton_money + top_money
         ratio_money = botton_money / total_money if total_money > 0 else None
 
-        log_color = LogColor.NORMAL
-        signal = None
+        signal = OrderSide.NO_ORDER_SIDE
         if ratio_money < 0.475:
-            log_color = LogColor.GREEN
-            signal = "LONG"
+            signal = OrderSide.BUY
         elif ratio_money > 0.525:
-            log_color = LogColor.RED
-            signal = "SHORT"
-        if signal:
-            self.log.info(
-                f"{book.instrument_id} -> [Book Order Ratio ({diff:.2%})] Ratio {ratio_money:.2%} | Signal {signal} | Botton {botton_money:,}$ | Top {top_money:,}$",
-                log_color,
-            )
-        return ratio_money
+            signal = OrderSide.SELL
+        return ratio_money, signal
 
     def on_instrument_status(self, data: InstrumentStatus) -> None:
         """
