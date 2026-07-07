@@ -24,6 +24,9 @@ from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 
+from src.notifications import SyncTelegramBridge
+from src.notifications import TelegramNotifier
+
 
 class OrderBookSpoofingDetectorConfig(ActorConfig, frozen=True):
     """
@@ -76,6 +79,32 @@ class OrderBookSpoofingDetector(Actor):
         self._atr: dict[InstrumentId, AverageTrueRange] = {}
         self._vwap: dict[InstrumentId, VolumeWeightedAveragePrice] = {}
         self._ema_volume: dict[InstrumentId, SimpleMovingAverage] = {}
+
+        # Telegram bridge — silent no-op when env vars are missing.
+        self._telegram: SyncTelegramBridge | None = None
+        try:
+            self._telegram = SyncTelegramBridge(TelegramNotifier.from_env())
+        except RuntimeError:
+            pass
+
+    def _notify_signal(
+        self,
+        label: str,
+        trade: TradeTick,
+        r1: float,
+        r2: float,
+        r3: float,
+    ) -> None:
+        if self._telegram is None:
+            return
+        emoji = "🟢" if "[BUY]" in label else "🔴"
+        text = (
+            f"{emoji} <b>{label}</b>\n"
+            f"<code>{trade.instrument_id}</code>\n"
+            f"price <code>{trade.price}</code> · size <code>{trade.size}</code>\n"
+            f"r1={r1:.2%} r2={r2:.2%} r3={r3:.2%}"
+        )
+        self._telegram.send(text)
 
     def on_start(self) -> None:  # noqa: C901 (too complex)
         """
@@ -231,6 +260,11 @@ class OrderBookSpoofingDetector(Actor):
         """
         Actions to be performed when the actor is stopped.
         """
+        # Close the telegram bridge first; idempotent.
+        if self._telegram is not None:
+            self._telegram.close()
+            self._telegram = None
+
         if not self.config.can_unsubscribe:
             return  # Unsubscribe not supported
 
@@ -370,84 +404,91 @@ class OrderBookSpoofingDetector(Actor):
         diff_price = midpoint * 0.00015
         ema = self._ema_volume[trade.instrument_id]
         ema.update_raw(trade.size.as_double())
+        minimum_size = instrument.make_qty(50_000 / midpoint)
         if not ema.initialized:
             return
         if trade.aggressor_side == AggressorSide.BUYER:
             top_price = instrument.make_price(midpoint + diff_price)
-            signal_size = book.get_quantity_for_price(top_price, OrderSide.BUY)
+            signal_size = instrument.make_qty(book.get_quantity_for_price(top_price, OrderSide.BUY))
         else:
             bottom_price = instrument.make_price(midpoint - diff_price)
-            signal_size = book.get_quantity_for_price(bottom_price, OrderSide.SELL)
-        if signal_size < ema.value:
-            return
-        if signal_size and trade.size > signal_size:
-            r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
-            r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
-            r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
-            vwap = self._vwap[trade.instrument_id].value
-            atr = self._atr[trade.instrument_id].value
-            bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
-            big_candle_found = None
-            for i in range(15):
-                bar = self.cache.bar(bar_type, i)
-                diff = bar.close - bar.open
-                if atr and abs(diff.as_double()) > atr:
-                    big_candle_found = bar
-                    break
-            self.log.info(
-                f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: {trade.size} @ {trade.price} (> {signal_size * midpoint:.2f}$) ({s1.name}, {s2.name}, {s3.name}) | VWAP: {vwap}",
-                LogColor.NORMAL,
+            signal_size = instrument.make_qty(
+                book.get_quantity_for_price(bottom_price, OrderSide.SELL)
             )
-            # Bull/Bear trap signal
-            if (
-                trade.aggressor_side == AggressorSide.BUYER
-                and s3 == OrderSide.SELL
-                and (
-                    (s2 == OrderSide.SELL and s1 != OrderSide.SELL)
-                    or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE)
-                )
-                and big_candle_found
-                and big_candle_found.close > big_candle_found.open
-            ):
-                self.log.info(
-                    f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                    LogColor.RED,
-                )
-            elif (
-                trade.aggressor_side == AggressorSide.SELLER
-                and s3 == OrderSide.BUY
-                and (
-                    (s2 == OrderSide.BUY and s1 != OrderSide.BUY)
-                    or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE)
-                )
-                and big_candle_found
-                and big_candle_found.close < big_candle_found.open
-            ):
-                self.log.info(
-                    f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                    LogColor.GREEN,
-                )
-            # Continue trend signal
-            if (
-                trade.aggressor_side == AggressorSide.BUYER
-                and s3 == OrderSide.BUY
-                and s2 == OrderSide.SELL
-                and s1 == OrderSide.BUY
-            ):
-                self.log.info(
-                    f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                    LogColor.GREEN,
-                )
-            elif (
-                trade.aggressor_side == AggressorSide.SELLER
-                and s3 == OrderSide.SELL
-                and s2 == OrderSide.BUY
-                and s1 == OrderSide.SELL
-            ):
-                self.log.info(
-                    f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                    LogColor.RED,
-                )
+        signal_size = max(minimum_size, signal_size)
+        if signal_size < ema.value or trade.size < signal_size:
+            return
+        r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
+        r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
+        r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
+        vwap = self._vwap[trade.instrument_id].value
+        atr = self._atr[trade.instrument_id].value
+        bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
+        big_bar_found = None
+        for i in range(8):
+            bar = self.cache.bar(bar_type, i)
+            diff = bar.high - bar.low
+            if atr and diff.as_double() > atr * 3:
+                big_bar_found = bar
+                break
+        self.log.info(
+            f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: {trade.size} @ {trade.price} (> {signal_size * midpoint:.2f}$) ({s1.name}, {s2.name}, {s3.name}) | VWAP: {vwap}",
+            LogColor.NORMAL,
+        )
+        # Bull/Bear trap signal
+        if (
+            trade.aggressor_side == AggressorSide.BUYER
+            and s3 == OrderSide.SELL
+            and (
+                (s2 == OrderSide.SELL and s1 != OrderSide.SELL)
+                or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE)
+            )
+            and big_bar_found
+            and big_bar_found.close > big_bar_found.open
+        ):
+            self.log.info(
+                f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                LogColor.RED,
+            )
+            self._notify_signal("Bull Trap - [SELL]", trade, r1, r2, r3)
+        elif (
+            trade.aggressor_side == AggressorSide.SELLER
+            and s3 == OrderSide.BUY
+            and (
+                (s2 == OrderSide.BUY and s1 != OrderSide.BUY)
+                or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE)
+            )
+            and big_bar_found
+            and big_bar_found.close < big_bar_found.open
+        ):
+            self.log.info(
+                f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                LogColor.GREEN,
+            )
+            self._notify_signal("Bear Trap - [BUY]", trade, r1, r2, r3)
+        # Continue trend signal
+        if (
+            trade.aggressor_side == AggressorSide.BUYER
+            and s3 == OrderSide.BUY
+            and s2 == OrderSide.SELL
+            and s1 == OrderSide.BUY
+        ):
+            self.log.info(
+                f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                LogColor.GREEN,
+            )
+            self._notify_signal("Continue Trend - [BUY]", trade, r1, r2, r3)
+        elif (
+            trade.aggressor_side == AggressorSide.SELLER
+            and s3 == OrderSide.SELL
+            and s2 == OrderSide.BUY
+            and s1 == OrderSide.SELL
+        ):
+            self.log.info(
+                f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                LogColor.RED,
+            )
+            self._notify_signal("Continue Trend - [SELL]", trade, r1, r2, r3)
 
     # generate method get the relation_qty given a float (for example 0.015) and make a log like this quantity given 0.015 - Botton Qty: 100 @ 100.0 | Top Qty: 200 @ 101.0
     def get_book_order_ratio(
