@@ -12,6 +12,6 @@ actors:
         # - ETHUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
         # - XRPUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
         # - SOLUSDT-PERP.BINANCE_FUTURES-1-MINUTE-LAST-EXTERNAL
-      subscribe_bars: true
+      subscribe_bars: false
       request_bars: true
-      requests_start_delta: 1w
+      requests_start_delta: 1h

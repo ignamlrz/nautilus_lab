@@ -1,7 +1,7 @@
 type: live
-server:
-  enabled: true
-  port: 8080
+# server:
+#   enabled: true
+#   port: 8080
 config:
   trader_id: TESTER-0001
   # data clients config
@@ -54,10 +54,12 @@ config:
     config_path: nautilus_trader.config:LoggingConfig
     config:
       log_level: INFO
+      log_level_file: INFO
+      log_directory: logs/binance-paper-trading
+      fileout_sync_on_flush: false
       log_component_levels:
-        TradingNode: INFO
-        Portfolio: INFO
-        APIMonitorActor: INFO
+        DataEngine: WARNING
+        Portfolio: WARNING
   # exec engine config
   exec_engine:
     config_path: nautilus_trader.config:LiveExecEngineConfig

@@ -1,0 +1,13 @@
+actors:
+  - actor_path: src.strategies.orderbooks.strategy:OrderBookSpoofingDetector
+    config_path: src.strategies.orderbooks.strategy:OrderBookSpoofingDetectorConfig
+    config:
+      instrument_ids:
+        - BTCUSDT-PERP.BINANCE_FUTURES
+        - ETHUSDT-PERP.BINANCE_FUTURES
+        - XRPUSDT-PERP.BINANCE_FUTURES
+        # - SOLUSDT-PERP.BINANCE_FUTURES
+      # order book
+      subscribe_book_at_interval: true
+      subscribe_trades: true
+      log_data: false
