@@ -440,6 +440,7 @@ class OrderBookLiquidityDetector(Actor):
             )
             and big_bar_found
             and big_bar_found.close > big_bar_found.open
+            and trade.price > vwap
         ):
             self.log.info(
                 f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
@@ -455,6 +456,7 @@ class OrderBookLiquidityDetector(Actor):
             )
             and big_bar_found
             and big_bar_found.close < big_bar_found.open
+            and trade.price < vwap
         ):
             self.log.info(
                 f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
@@ -467,6 +469,7 @@ class OrderBookLiquidityDetector(Actor):
             and s3 == OrderSide.BUY
             and s2 == OrderSide.SELL
             and s1 == OrderSide.BUY
+            and trade.price < vwap
         ):
             self.log.info(
                 f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
@@ -478,6 +481,7 @@ class OrderBookLiquidityDetector(Actor):
             and s3 == OrderSide.SELL
             and s2 == OrderSide.BUY
             and s1 == OrderSide.SELL
+            and trade.price > vwap
         ):
             self.log.info(
                 f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",

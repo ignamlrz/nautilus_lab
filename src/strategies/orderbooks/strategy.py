@@ -1,3 +1,4 @@
+from collections import deque
 from decimal import Decimal
 
 import pandas as pd
@@ -38,6 +39,7 @@ class OrderbookStrategy(Strategy):
 
         self._rsi: dict[InstrumentId, RelativeStrengthIndex] = {}
         self._ema: dict[InstrumentId, ExponentialMovingAverage] = {}
+        self._ema_history: dict[InstrumentId, deque[float]] = {}
         self._ob_liquidity: dict[InstrumentId, OrderBookLiquidityData] = {}
 
     def on_start(self):
@@ -59,18 +61,18 @@ class OrderbookStrategy(Strategy):
         self._rsi[instrument_id] = RelativeStrengthIndex(
             period=14, ma_type=MovingAverageType.WILDER
         )
+        self._ema_history[instrument_id] = deque(maxlen=50)
         self._ema[instrument_id] = ema = ExponentialMovingAverage(period=15)
         bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
-        self.register_indicator_for_bars(bar_type, ema)
-        self.request_bars(
-            bar_type=bar_type,
-            start=self.clock.utc_now() - pd.Timedelta(minutes=1440),
-            client_id=self.config.client_id,
-        )
         self.subscribe_bars(
             bar_type=bar_type,
             client_id=self.config.client_id,
         )
+        self.register_indicator_for_bars(bar_type, ema)
+        for b in reversed(self.cache.bars(bar_type)):
+            ema.update_raw(b.close.as_double())
+            self._ema_history[instrument_id].appendleft(self._ema[instrument_id].value)
+            self.update_rsi(b)
 
     def update_rsi(self, bar: Bar) -> None:
         instrument_id = bar.bar_type.instrument_id
@@ -84,6 +86,7 @@ class OrderbookStrategy(Strategy):
             return
         if bar.bar_type.spec.timedelta == pd.Timedelta(minutes=1):
             self.update_rsi(bar)
+            self._ema_history[instrument_id].appendleft(self._ema[instrument_id].value)
         data = self._ob_liquidity[instrument_id]
         rsi = self._rsi[instrument_id]
         ema = self._ema[instrument_id]
@@ -136,24 +139,36 @@ class OrderbookStrategy(Strategy):
             data.order_side == OrderSide.BUY
             and s3 == OrderSide.BUY
             and s1 != OrderSide.SELL
-            and self.cache.bar(bar.bar_type, 1).close < ema.value
+            and self.cache.bar(bar.bar_type, 1).close < self._ema_history[instrument_id][1]
             and bar.close > ema.value
             and rsi.value < 0.5
         ):
-            self.buy(instrument, balance_free, label=data.label)
+            for i in range(5, 14):
+                bar0 = self.cache.bar(bar.bar_type, i)
+                bar1 = self.cache.bar(bar.bar_type, i + 1)
+                ema0 = self._ema_history[instrument_id][i]
+                ema1 = self._ema_history[instrument_id][i + 1]
+                if bar0.close > ema0 and bar1.close > ema1:
+                    self.buy(instrument, balance_free, label=data.label)
+                    break
         elif (
             data.order_side == OrderSide.SELL
             and s3 == OrderSide.SELL
             and s1 != OrderSide.BUY
-            and self.cache.bar(bar.bar_type, 1).close > ema.value
+            and self.cache.bar(bar.bar_type, 1).close > self._ema_history[instrument_id][1]
             and bar.close < ema.value
             and rsi.value > 0.5
         ):
-            self.sell(instrument, balance_free, label=data.label)
+            for i in range(5, 14):
+                bar0 = self.cache.bar(bar.bar_type, i)
+                bar1 = self.cache.bar(bar.bar_type, i + 1)
+                ema0 = self._ema_history[instrument_id][i]
+                ema1 = self._ema_history[instrument_id][i + 1]
+                if bar0.close < ema0 and bar1.close < ema1:
+                    self.sell(instrument, balance_free, label=data.label)
+                    break
 
     def on_data(self, data):
-        if isinstance(data, Bar):
-            self.update_rsi(data)
         if isinstance(data, OrderBookLiquidityData):
             # check if has indicators initialized
             if data.instrument_id not in self._rsi or data.instrument_id not in self._ema:
