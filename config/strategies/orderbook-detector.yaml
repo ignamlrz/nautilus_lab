@@ -1,6 +1,10 @@
+strategies:
+  - strategy_path: src.strategies.orderbooks.strategy:OrderbookStrategy
+    config_path: src.strategies.orderbooks.strategy:OrderbookStrategyConfig
+    config: {}
 actors:
-  - actor_path: src.strategies.orderbooks.strategy:OrderBookSpoofingDetector
-    config_path: src.strategies.orderbooks.strategy:OrderBookSpoofingDetectorConfig
+  - actor_path: src.strategies.orderbooks.detector:OrderBookLiquidityDetector
+    config_path: src.strategies.orderbooks.detector:OrderBookLiquidityDetectorConfig
     config:
       instrument_ids:
         # crypto

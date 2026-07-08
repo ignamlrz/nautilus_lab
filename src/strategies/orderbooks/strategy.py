@@ -1,251 +1,68 @@
-from typing import Any
+from decimal import Decimal
 
 import pandas as pd
-from nautilus_trader.common.actor import Actor
-from nautilus_trader.common.config import ActorConfig
-from nautilus_trader.common.config import PositiveInt
+from nautilus_trader.common.component import TimeEvent
 from nautilus_trader.common.enums import LogColor
-from nautilus_trader.core import nautilus_pyo3
-from nautilus_trader.indicators import AverageTrueRange
-from nautilus_trader.indicators import SimpleMovingAverage
-from nautilus_trader.indicators import VolumeWeightedAveragePrice
+from nautilus_trader.indicators import RelativeStrengthIndex
+from nautilus_trader.indicators.averages import ExponentialMovingAverage
 from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
-from nautilus_trader.model.data import FundingRateUpdate
-from nautilus_trader.model.data import InstrumentStatus
-from nautilus_trader.model.data import OrderBookDeltas
-from nautilus_trader.model.data import OrderBookDepth10
-from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
-from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.data import DataType
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderType
+from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.objects import Money
+from nautilus_trader.trading import Strategy
+from nautilus_trader.trading.config import StrategyConfig
 
 from src.notifications import SyncTelegramBridge
 from src.notifications import TelegramNotifier
 
+from .detector import OrderBookLiquidityData
 
-class OrderBookSpoofingDetectorConfig(ActorConfig, frozen=True):
-    """
-    Configuration for ``OrderBookSpoofingDetector`` instances.
-    """
 
-    instrument_ids: list[InstrumentId]
+class OrderbookStrategyConfig(StrategyConfig):
     client_id: ClientId | None = None
-    subscribe_book_deltas: bool = False
-    subscribe_book_depth: bool = False
-    subscribe_book_at_interval: bool = False
-    subscribe_trades: bool = False
-    subscribe_funding_rates: bool = False
-    subscribe_instrument: bool = False
-    subscribe_instrument_status: bool = False
-    subscribe_instrument_close: bool = False
-    subscribe_params: dict[str, Any] | None = None
-    can_unsubscribe: bool = True
-    request_instruments: bool = False
-    request_book_snapshot: bool = False
-    request_book_deltas: bool = False
-    request_trades: bool = False
-    request_funding_rates: bool = False
-    request_params: dict[str, Any] | None = None
-    requests_start_delta: pd.Timedelta | None = None
-    book_type: BookType = BookType.L2_MBP
-    book_depth: PositiveInt | None = None
-    book_interval_ms: PositiveInt = 1000
-    book_levels_to_print: PositiveInt = 10
-    manage_book: bool = True
-    use_pyo3_book: bool = False
-    log_data: bool = True
 
 
-class OrderBookSpoofingDetector(Actor):
-    """
-    An actor for detecting order book spoofing.
-
-    Parameters
-    ----------
-    config : OrderBookSpoofingDetectorConfig
-        The configuration for the instance.
-
-    """
-
-    def __init__(self, config: OrderBookSpoofingDetectorConfig) -> None:
+class OrderbookStrategy(Strategy):
+    def __init__(self, config=None):
         super().__init__(config)
+        self._telegram = SyncTelegramBridge(TelegramNotifier.from_env())
+        self._telegram_notified: set[str] = set()
 
-        self._books: dict[InstrumentId, OrderBook] = {}
-        self._atr: dict[InstrumentId, AverageTrueRange] = {}
-        self._vwap: dict[InstrumentId, VolumeWeightedAveragePrice] = {}
-        self._ema_volume: dict[InstrumentId, SimpleMovingAverage] = {}
+        self._rsi: dict[InstrumentId, RelativeStrengthIndex] = {}
+        self._ema: dict[InstrumentId, ExponentialMovingAverage] = {}
+        self._ob_liquidity: dict[InstrumentId, OrderBookLiquidityData] = {}
 
-        # Telegram bridge — silent no-op when env vars are missing.
-        self._telegram: SyncTelegramBridge | None = None
-        try:
-            self._telegram = SyncTelegramBridge(TelegramNotifier.from_env())
-        except RuntimeError:
-            pass
+    def on_start(self):
+        self.subscribe_data(DataType(OrderBookLiquidityData), client_id=self.config.client_id)
 
-    def _notify_signal(
-        self,
-        label: str,
-        trade: TradeTick,
-        r1: float,
-        r2: float,
-        r3: float,
-    ) -> None:
-        if self._telegram is None:
-            return
-        emoji = "🟢" if "[BUY]" in label else "🔴"
-        text = (
-            f"{emoji} <b>{label}</b>\n"
-            f"<code>{trade.instrument_id}</code>\n"
-            f"price <code>{trade.price}</code> · size <code>{trade.size}</code>\n"
-            f"r1={r1:.2%} r2={r2:.2%} r3={r3:.2%}"
-        )
-        self._telegram.send(text)
+    def on_stop(self):
+        # Close the telegram bridge first; idempotent.
+        if self._telegram is not None:
+            self._telegram.close()
+            self._telegram = None
 
-    def on_start(self) -> None:  # noqa: C901 (too complex)
-        """
-        Actions to be performed when the actor is started.
-        """
-        # Determine requests start
-        requests_start_delta = self.config.requests_start_delta or pd.Timedelta(hours=1)
-        requests_start = self.clock.utc_now() - requests_start_delta
+        self.unsubscribe_data(DataType(OrderBookLiquidityData), client_id=self.config.client_id)
 
-        client_id = self.config.client_id
-
-        if self.config.request_instruments:
-            venues = set()
-
-            for instrument_id in self.config.instrument_ids or []:
-                venues.add(instrument_id.venue)
-
-            for venue in venues:
-                self.request_instruments(
-                    venue=venue,
-                    client_id=client_id,
-                    params=self.config.request_params,
-                )
-
-        for instrument_id in self.config.instrument_ids or []:
-            self.setup_indicators(instrument_id)
-
-            if self.config.subscribe_instrument:
-                self.subscribe_instrument(instrument_id)
-
-            if self.config.subscribe_book_deltas:
-                self.subscribe_order_book_deltas(
-                    instrument_id=instrument_id,
-                    book_type=self.config.book_type,
-                    client_id=client_id,
-                    pyo3_conversion=self.config.use_pyo3_book,
-                )
-
-                if self.config.manage_book:
-                    if self.config.use_pyo3_book:
-                        self.setup_book_pyo3(instrument_id)
-                    else:
-                        self.setup_book(instrument_id)
-
-            if self.config.subscribe_book_at_interval:
-                self.subscribe_order_book_at_interval(
-                    instrument_id=instrument_id,
-                    book_type=self.config.book_type,
-                    depth=self.config.book_depth or 0,
-                    interval_ms=self.config.book_interval_ms,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_book_depth:
-                self.subscribe_order_book_depth(
-                    instrument_id=instrument_id,
-                    book_type=self.config.book_type,
-                    depth=self.config.book_depth or 10,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_trades:
-                self.subscribe_trade_ticks(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_funding_rates:
-                self.subscribe_funding_rates(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_instrument_status:
-                self.subscribe_instrument_status(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_instrument_close:
-                self.subscribe_instrument_close(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.request_book_snapshot:
-                self.request_order_book_snapshot(
-                    instrument_id=instrument_id,
-                    limit=self.config.book_depth or 0,
-                    client_id=client_id,
-                    params=self.config.request_params,
-                )
-
-            if self.config.request_book_deltas:
-                self.request_order_book_deltas(
-                    instrument_id=instrument_id,
-                    start=requests_start,
-                    client_id=client_id,
-                    params=self.config.request_params,
-                )
-
-            if self.config.request_trades:
-                self.request_trade_ticks(
-                    instrument_id=instrument_id,
-                    start=requests_start,
-                    client_id=client_id,
-                    params=self.config.request_params,
-                )
-
-            if self.config.request_funding_rates:
-                funding_start = self.clock.utc_now() - pd.Timedelta(days=7)
-                self.request_funding_rates(
-                    instrument_id=instrument_id,
-                    start=funding_start,
-                    client_id=client_id,
-                    params=self.config.request_params,
-                )
-
-    def setup_book(self, instrument_id: InstrumentId) -> None:
-        self._books[instrument_id] = OrderBook(instrument_id, self.config.book_type)
-
-    def setup_book_pyo3(self, instrument_id: InstrumentId) -> None:
-        book_type: nautilus_pyo3.BookType = nautilus_pyo3.BookType.L2_MBP
-        pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(instrument_id.value)
-        self._books[pyo3_instrument_id] = nautilus_pyo3.OrderBook(pyo3_instrument_id, book_type)
+        for instrument_id in self._rsi:
+            bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
+            self.unsubscribe_bars(bar_type=bar_type, client_id=self.config.client_id)
 
     def setup_indicators(self, instrument_id: InstrumentId) -> None:
-        self._vwap[instrument_id] = vwap = VolumeWeightedAveragePrice()
-        self._atr[instrument_id] = atr = AverageTrueRange(
+        self._rsi[instrument_id] = rsi = RelativeStrengthIndex(
             period=14, ma_type=MovingAverageType.WILDER
         )
-        self._ema_volume[instrument_id] = SimpleMovingAverage(period=50)
+        self._ema[instrument_id] = ema = ExponentialMovingAverage(period=15)
         bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
-        self.register_indicator_for_bars(bar_type, vwap)
-        self.register_indicator_for_bars(bar_type, atr)
+        self.register_indicator_for_bars(bar_type, rsi)
+        self.register_indicator_for_bars(bar_type, ema)
         self.request_bars(
             bar_type=bar_type,
             start=self.clock.utc_now() - pd.Timedelta(minutes=1440),
@@ -256,241 +73,183 @@ class OrderBookSpoofingDetector(Actor):
             client_id=self.config.client_id,
         )
 
-    def on_stop(self) -> None:  # noqa: C901 (too complex)
-        """
-        Actions to be performed when the actor is stopped.
-        """
-        # Close the telegram bridge first; idempotent.
-        if self._telegram is not None:
-            self._telegram.close()
-            self._telegram = None
-
-        if not self.config.can_unsubscribe:
-            return  # Unsubscribe not supported
-
-        client_id = self.config.client_id
-
-        for instrument_id in self.config.instrument_ids or []:
-            if self.config.subscribe_instrument:
-                self.unsubscribe_instrument(
-                    instrument_id=instrument_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_book_deltas:
-                self.unsubscribe_order_book_deltas(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_book_depth:
-                self.unsubscribe_order_book_depth(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_book_at_interval:
-                self.unsubscribe_order_book_at_interval(
-                    instrument_id=instrument_id,
-                    interval_ms=self.config.book_interval_ms,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_trades:
-                self.unsubscribe_trade_ticks(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_funding_rates:
-                self.unsubscribe_funding_rates(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_instrument_status:
-                self.unsubscribe_instrument_status(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-            if self.config.subscribe_instrument_close:
-                self.unsubscribe_instrument_close(
-                    instrument_id=instrument_id,
-                    client_id=client_id,
-                    params=self.config.subscribe_params,
-                )
-
-    def on_historical_data(self, data: Any) -> None:
-        """
-        Actions to be performed when the actor is running and receives historical data.
-        """
-        if self.config.log_data:
-            self.log.info("Historical " + repr(data), LogColor.CYAN)
-
-    def on_instrument(self, instrument: Instrument) -> None:
-        """
-        Actions to be performed when the actor receives an instrument.
-        """
-        if self.config.log_data:
-            self.log.info(repr(instrument), LogColor.CYAN)
-
-    def on_instruments(self, instruments: list[Instrument]) -> None:
-        """
-        Actions to be performed when the actor receives multiple instruments.
-        """
-        if self.config.log_data:
-            self.log.info(f"Received <Instrument[{len(instruments)}]> data", LogColor.CYAN)
-            for instrument in instruments:
-                self.log.info(repr(instrument), LogColor.CYAN)
-
-    def on_order_book_deltas(self, deltas: OrderBookDeltas) -> None:
-        """
-        Actions to be performed when the actor is running and receives order book
-        deltas.
-        """
-        if self.config.manage_book:
-            book = self._books[deltas.instrument_id]
-            book.apply_deltas(deltas)
-
-            if self.config.log_data:
-                num_levels = self.config.book_levels_to_print
-                self.log.info(
-                    f"\n{book.instrument_id}\n{book.pprint(num_levels)}",
-                    LogColor.CYAN,
-                )
-        elif self.config.log_data:
-            self.log.info(repr(deltas), LogColor.CYAN)
-
-    def on_order_book_depth(self, depth: OrderBookDepth10) -> None:
-        """
-        Actions to be performed when the actor is running and receives order book depth.
-        """
-        if self.config.log_data:
-            self.log.info(repr(depth), LogColor.CYAN)
-
-    def on_order_book(self, order_book: OrderBook) -> None:
-        """
-        Actions to be performed when an order book update is received.
-        """
-        if self.config.log_data:
-            num_levels = self.config.book_levels_to_print
-            self.log.info(
-                f"\n{order_book.instrument_id}\n{order_book.pprint(num_levels)}",
-                LogColor.CYAN,
-            )
-
-    def on_trade_tick(self, trade: TradeTick) -> None:
-        """
-        Actions to be performed when the actor is running and receives a trade.
-        """
-        if self.config.log_data:
-            self.log.info(repr(trade), LogColor.CYAN)
-        book = self.cache.order_book(trade.instrument_id)
-        book_best_bid_size = book.best_bid_size()
-        book_best_ask_size = book.best_ask_size()
-        if not book_best_bid_size or not book_best_ask_size:
+    def on_bar(self, bar: Bar):
+        instrument_id = bar.bar_type.instrument_id
+        if instrument_id not in self._ob_liquidity:
             return
-        instrument = self.cache.instrument(book.instrument_id)
+        data = self._ob_liquidity[instrument_id]
+        rsi = self._rsi[instrument_id]
+        ema = self._ema[instrument_id]
+        if not rsi.initialized or not ema.initialized:
+            return
+        instrument = self.cache.instrument(instrument_id)
         if not instrument:
+            self.log.warning(f"Instrument not found: {instrument_id}")
             return
-        midpoint = book.midpoint()
-        diff_price = midpoint * 0.00015
-        ema = self._ema_volume[trade.instrument_id]
-        ema.update_raw(trade.size.as_double())
-        minimum_size = instrument.make_qty(50_000 / midpoint)
-        if not ema.initialized:
-            return
-        if trade.aggressor_side == AggressorSide.BUYER:
-            top_price = instrument.make_price(midpoint + diff_price)
-            signal_size = instrument.make_qty(book.get_quantity_for_price(top_price, OrderSide.BUY))
-        else:
-            bottom_price = instrument.make_price(midpoint - diff_price)
-            signal_size = instrument.make_qty(
-                book.get_quantity_for_price(bottom_price, OrderSide.SELL)
-            )
-        signal_size = max(minimum_size, signal_size)
-        if signal_size < ema.value or trade.size < signal_size:
-            return
-        r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
-        r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
-        r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
-        vwap = self._vwap[trade.instrument_id].value
-        atr = self._atr[trade.instrument_id].value
-        bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
-        big_bar_found = None
-        for i in range(8):
-            bar = self.cache.bar(bar_type, i)
-            diff = bar.high - bar.low
-            if atr and diff.as_double() > atr * 3:
-                big_bar_found = bar
-                break
-        self.log.info(
-            f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: {trade.size} @ {trade.price} (> {signal_size * midpoint:.2f}$) ({s1.name}, {s2.name}, {s3.name}) | VWAP: {vwap}",
-            LogColor.NORMAL,
+        balance_free = self.portfolio.account(instrument.id.venue).balance_free(
+            currency=instrument.quote_currency
         )
-        # Bull/Bear trap signal
+        if not balance_free or balance_free.as_decimal() <= 0:
+            self.log.warning(f"It has not free balance on venue: {instrument.id.venue}")
+            return
+        exposure = self.portfolio.net_exposure(instrument.id)
+        ob = self.cache.order_book(instrument.id)
+        r, o = self.get_book_order_ratio(ob, instrument, 0.33)
+        if exposure.as_decimal() != 0:
+            for p in self.cache.positions_open(instrument_id=instrument.id):
+                if p.side == PositionSide.LONG and o == OrderSide.SELL:
+                    self.close_position(p)
+                    self.log.info(
+                        f"Closing LONG position on instrument: {instrument.id} due to SELL signal from order book ratio: {r:.2%}"
+                    )
+                    self._notify_telegram(
+                        f"Closing LONG position on instrument {instrument.id} due to SELL signal on order book ratio",
+                        instrument.id,
+                        text=f"Order Book Ratio: {r:.2%}",
+                    )
+                elif p.side == PositionSide.SHORT and o == OrderSide.BUY:
+                    self.close_position(p)
+                    self.log.info(
+                        f"Closing SHORT position on instrument: {instrument.id} due to BUY signal from order book ratio: {r:.2%}"
+                    )
+                    self._notify_telegram(
+                        f"Closing SHORT position on instrument {instrument.id} due to BUY signal on order book ratio",
+                        instrument.id,
+                        text=f"Order Book Ratio: {r:.2%}",
+                    )
+            self.log.warning(
+                f"It has exposure on instrument: {instrument.id} with exposure: {exposure}"
+            )
+            return
         if (
-            trade.aggressor_side == AggressorSide.BUYER
-            and s3 == OrderSide.SELL
-            and (
-                (s2 == OrderSide.SELL and s1 != OrderSide.SELL)
-                or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE)
-            )
-            and big_bar_found
-            and big_bar_found.close > big_bar_found.open
+            data.order_side == OrderSide.BUY
+            and o == OrderSide.BUY
+            and bar.close > ema.value
+            and rsi.value < 50
         ):
-            self.log.info(
-                f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.RED,
-            )
-            self._notify_signal("Bull Trap - [SELL]", trade, r1, r2, r3)
+            self.buy(instrument, balance_free, label=data.label)
         elif (
-            trade.aggressor_side == AggressorSide.SELLER
-            and s3 == OrderSide.BUY
-            and (
-                (s2 == OrderSide.BUY and s1 != OrderSide.BUY)
-                or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE)
-            )
-            and big_bar_found
-            and big_bar_found.close < big_bar_found.open
+            data.order_side == OrderSide.SELL
+            and o == OrderSide.SELL
+            and bar.close < ema.value
+            and rsi.value > 50
         ):
-            self.log.info(
-                f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.GREEN,
-            )
-            self._notify_signal("Bear Trap - [BUY]", trade, r1, r2, r3)
-        # Continue trend signal
-        if (
-            trade.aggressor_side == AggressorSide.BUYER
-            and s3 == OrderSide.BUY
-            and s2 == OrderSide.SELL
-            and s1 == OrderSide.BUY
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.GREEN,
-            )
-            self._notify_signal("Continue Trend - [BUY]", trade, r1, r2, r3)
-        elif (
-            trade.aggressor_side == AggressorSide.SELLER
-            and s3 == OrderSide.SELL
-            and s2 == OrderSide.BUY
-            and s1 == OrderSide.SELL
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.RED,
-            )
-            self._notify_signal("Continue Trend - [SELL]", trade, r1, r2, r3)
+            self.sell(instrument, balance_free, label=data.label)
 
-    # generate method get the relation_qty given a float (for example 0.015) and make a log like this quantity given 0.015 - Botton Qty: 100 @ 100.0 | Top Qty: 200 @ 101.0
+    def on_data(self, data):
+        if isinstance(data, OrderBookLiquidityData):
+            # check if has indicators initialized
+            if data.instrument_id not in self._rsi or data.instrument_id not in self._ema:
+                self.setup_indicators(data.instrument_id)
+
+            self._ob_liquidity[data.instrument_id] = data
+            self.log.info(
+                f"Received signal: {data.label} for instrument: {data.instrument_id} with ratios: {data.ratios}"
+            )
+            self._notify_telegram(data.label, data.instrument_id, text=f"Ratios: {data.ratios}")
+            self.clock.set_time_alert(
+                name=f"OrderbookStrategy:{data.instrument_id}",
+                alert_time=self.clock.utc_now() + pd.Timedelta(minutes=5),
+                callback=lambda e: self._ob_liquidity.pop(data.instrument_id),
+                override=True,
+            )
+
+    def buy(self, instrument: Instrument, balance_free: Money, label: str):
+        ob = self.cache.order_book(instrument.id)
+        bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
+        entry_price = ob.best_bid_price() or instrument.make_price(ob.midpoint())
+        sl_price = entry_price
+        for i in range(5):
+            bar = self.cache.bar(bar_type, i)
+            sl_price = min(sl_price, bar.low)
+        sl_price = instrument.make_price(sl_price - (instrument.price_increment * 10))
+        diff = entry_price - sl_price
+        min_tp_price = entry_price * (1 + (instrument.taker_fee * Decimal("2.5")))
+        tp_price = instrument.make_price(max(min_tp_price, entry_price + diff * 2))
+        quantity = instrument.make_qty((balance_free * 0.1) / entry_price)
+        order_list = self.order_factory.bracket(
+            instrument_id=instrument.id,
+            order_side=OrderSide.BUY,
+            quantity=quantity,
+            # Entry order
+            entry_order_type=OrderType.LIMIT,
+            entry_price=entry_price,
+            # Take-profit order
+            tp_price=tp_price,
+            # Stop-loss order
+            sl_trigger_price=sl_price,
+        )
+        self.submit_order_list(order_list)
+        text = f"● Entry Price: <code>{entry_price}</code> @ Size: <code>{quantity}</code>\n"
+        text += f"● Stop-Loss Price: <code>{sl_price}</code>\n"
+        text += f"● Take-Profit Price: <code>{tp_price}</code>\n"
+        self.log.info(
+            f"Created bracket order for instrument: {instrument.id} with entry price: {entry_price}, stop-loss price: {sl_price}, take-profit price: {tp_price}, quantity: {quantity}",
+            LogColor.GREEN,
+        )
+        self._notify_telegram(f"{label} - Created", instrument.id, text)
+        return order_list
+
+    def sell(self, instrument: Instrument, balance_free: Money, label: str):
+
+        ob = self.cache.order_book(instrument.id)
+        bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
+        entry_price = ob.best_bid_price() or instrument.make_price(ob.midpoint())
+        sl_price = entry_price
+        for i in range(5):
+            bar = self.cache.bar(bar_type, i)
+            sl_price = max(sl_price, bar.high)
+        sl_price = instrument.make_price(sl_price + (instrument.price_increment * 10))
+        diff = sl_price - entry_price
+        min_tp_price = entry_price * (1 - (instrument.taker_fee * Decimal("2.5")))
+        tp_price = instrument.make_price(min(min_tp_price, entry_price - diff * 2))
+        quantity = instrument.make_qty((balance_free * 0.1) / entry_price)
+        order_list = self.order_factory.bracket(
+            instrument_id=instrument.id,
+            order_side=OrderSide.SELL,
+            quantity=quantity,
+            # Entry order
+            entry_order_type=OrderType.LIMIT,
+            entry_price=entry_price,
+            # Take-profit order
+            tp_price=tp_price,
+            # Stop-loss order
+            sl_trigger_price=sl_price,
+        )
+        # write on bullets entry price @ quantity, sl price, tp price
+        self.submit_order_list(order_list)
+        text = f"● Entry Price: <code>{entry_price}</code> @ Size: <code>{quantity}</code>\n"
+        text += f"● Stop-Loss Price: <code>{sl_price}</code>\n"
+        text += f"● Take-Profit Price: <code>{tp_price}</code>\n"
+        self._notify_telegram(f"{label} - Created", instrument.id, text)
+        self.log.info(
+            f"Created bracket order for instrument: {instrument.id} with entry price: {entry_price}, stop-loss price: {sl_price}, take-profit price: {tp_price}, quantity: {quantity}",
+            LogColor.GREEN,
+        )
+        return order_list
+
+    def _notify_telegram(self, label: str, instrument_id: InstrumentId, text: str) -> None:
+        key = f"{instrument_id}:{label}"
+        if self._telegram is None or key in self._telegram_notified:
+            return
+        self._telegram_notified.add(key)
+        emoji = ""
+        if "BUY" in label:
+            emoji = "🟢"
+        elif "SELL" in label:
+            emoji = "🔴"
+        text = f"{emoji} <b>{label}</b>\n<code>{instrument_id}</code>\n{text}"
+        self._telegram.send(text)
+
+        def clear_signal(e: TimeEvent):
+            self._telegram_notified.discard(e.name)
+
+        self.clock.set_time_alert(
+            name=key,
+            alert_time=self.clock.utc_now() + pd.Timedelta(minutes=5),
+            callback=clear_signal,
+        )
+
     def get_book_order_ratio(
         self, book: OrderBook, instrument: Instrument, diff: float = 0.01
     ) -> tuple[float | None, OrderSide]:
@@ -517,19 +276,3 @@ class OrderBookSpoofingDetector(Actor):
         elif ratio_money > 0.525:
             signal = OrderSide.SELL
         return ratio_money, signal
-
-    def on_instrument_status(self, data: InstrumentStatus) -> None:
-        """
-        Actions to be performed when the actor is running and receives an instrument
-        status update.
-        """
-        if self.config.log_data:
-            self.log.info(repr(data), LogColor.CYAN)
-
-    def on_funding_rate(self, funding_rate: FundingRateUpdate) -> None:
-        """
-        Actions to be performed when the actor is running and receives a funding rate
-        update.
-        """
-        if self.config.log_data:
-            self.log.info(repr(funding_rate), LogColor.CYAN)

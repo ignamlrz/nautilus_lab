@@ -64,7 +64,7 @@ config:
         venue: BINANCE_FUTURES
         account_type: MARGIN
         starting_balances:
-          - 1000 USDT
+          - 100_000 USDT
     - factory_path: nautilus_trader.adapters.sandbox.factory:SandboxLiveExecClientFactory
       config_path: nautilus_trader.adapters.sandbox.config:SandboxExecutionClientConfig
       config:
