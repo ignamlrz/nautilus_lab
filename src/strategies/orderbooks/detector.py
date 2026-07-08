@@ -236,7 +236,7 @@ class OrderBookLiquidityDetector(Actor):
     def setup_indicators(self, instrument_id: InstrumentId) -> None:
         self._vwap[instrument_id] = vwap = VolumeWeightedAveragePrice()
         self._atr[instrument_id] = atr = AverageTrueRange(
-            period=14, ma_type=MovingAverageType.WILDER
+            period=60, ma_type=MovingAverageType.WILDER
         )
         self._ema_volume[instrument_id] = SimpleMovingAverage(period=50)
         bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
@@ -406,8 +406,7 @@ class OrderBookLiquidityDetector(Actor):
             signal_size = instrument.make_qty(
                 book.get_quantity_for_price(bottom_price, OrderSide.SELL)
             )
-        signal_size = max(minimum_size, signal_size)
-        if signal_size < ema.value or trade.size < signal_size:
+        if signal_size < minimum_size or signal_size < ema.value or trade.size < signal_size:
             return
         r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
         r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)

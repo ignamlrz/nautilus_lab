@@ -94,45 +94,53 @@ class OrderbookStrategy(Strategy):
             return
         exposure = self.portfolio.net_exposure(instrument.id)
         ob = self.cache.order_book(instrument.id)
-        r, o = self.get_book_order_ratio(ob, instrument, 0.33)
+        r1, s1 = self.get_book_order_ratio(ob, instrument, 0.015)
+        r3, s3 = self.get_book_order_ratio(ob, instrument, 0.33)
         if exposure.as_decimal() != 0:
             for p in self.cache.positions_open(instrument_id=instrument.id):
-                if p.side == PositionSide.LONG and o == OrderSide.SELL:
+                if p.side == PositionSide.LONG and s3 == OrderSide.SELL:
                     self.close_position(p)
                     self.log.info(
-                        f"Closing LONG position on instrument: {instrument.id} due to SELL signal from order book ratio: {r:.2%}"
+                        f"Closing LONG position on instrument: {instrument.id} due to SELL signal from order book ratio: {r3:.2%}"
                     )
                     self._notify_telegram(
                         f"Closing LONG position on instrument {instrument.id} due to SELL signal on order book ratio",
                         instrument.id,
-                        text=f"Order Book Ratio: {r:.2%}",
+                        text=f"Order Book Ratio: {r3:.2%}",
                     )
-                elif p.side == PositionSide.SHORT and o == OrderSide.BUY:
+                elif p.side == PositionSide.SHORT and s3 == OrderSide.BUY:
                     self.close_position(p)
                     self.log.info(
-                        f"Closing SHORT position on instrument: {instrument.id} due to BUY signal from order book ratio: {r:.2%}"
+                        f"Closing SHORT position on instrument: {instrument.id} due to BUY signal from order book ratio: {r3:.2%}"
                     )
                     self._notify_telegram(
                         f"Closing SHORT position on instrument {instrument.id} due to BUY signal on order book ratio",
                         instrument.id,
-                        text=f"Order Book Ratio: {r:.2%}",
+                        text=f"Order Book Ratio: {r3:.2%}",
                     )
             self.log.warning(
                 f"It has exposure on instrument: {instrument.id} with exposure: {exposure}"
             )
             return
+        self.log.info(
+            f"{instrument.id} -> Trying create {data.order_side.name} order with free balance: {balance_free} | OB Signal: [{s1.name}, {s3.name}] | RSI: {rsi.value:.2f} | EMA: {ema.value:.2f}"
+        )
         if (
             data.order_side == OrderSide.BUY
-            and o == OrderSide.BUY
+            and s3 == OrderSide.BUY
+            and s1 != OrderSide.SELL
+            and self.cache.bar(bar.bar_type, 1).close < ema.value
             and bar.close > ema.value
-            and rsi.value < 50
+            and rsi.value < 0.5
         ):
             self.buy(instrument, balance_free, label=data.label)
         elif (
             data.order_side == OrderSide.SELL
-            and o == OrderSide.SELL
+            and s3 == OrderSide.SELL
+            and s1 != OrderSide.BUY
+            and self.cache.bar(bar.bar_type, 1).close > ema.value
             and bar.close < ema.value
-            and rsi.value > 50
+            and rsi.value > 0.5
         ):
             self.sell(instrument, balance_free, label=data.label)
 
@@ -149,20 +157,19 @@ class OrderbookStrategy(Strategy):
             self._notify_telegram(data.label, data.instrument_id, text=f"Ratios: {data.ratios}")
             self.clock.set_time_alert(
                 name=f"OrderbookStrategy:{data.instrument_id}",
-                alert_time=self.clock.utc_now() + pd.Timedelta(minutes=5),
-                callback=lambda e: self._ob_liquidity.pop(data.instrument_id),
+                alert_time=self.clock.utc_now() + pd.Timedelta(minutes=10, seconds=10),
+                callback=lambda e: self._ob_liquidity.pop(data.instrument_id, None),
                 override=True,
             )
 
     def buy(self, instrument: Instrument, balance_free: Money, label: str):
-        ob = self.cache.order_book(instrument.id)
         bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
-        entry_price = ob.best_bid_price() or instrument.make_price(ob.midpoint())
+        entry_price = instrument.make_price(self._ema[instrument.id].value)
         sl_price = entry_price
-        for i in range(5):
+        for i in range(15):
             bar = self.cache.bar(bar_type, i)
             sl_price = min(sl_price, bar.low)
-        sl_price = instrument.make_price(sl_price - (instrument.price_increment * 10))
+        sl_price = instrument.make_price(entry_price - (entry_price - sl_price) * Decimal("1.2"))
         diff = entry_price - sl_price
         min_tp_price = entry_price * (1 + (instrument.taker_fee * Decimal("2.5")))
         tp_price = instrument.make_price(max(min_tp_price, entry_price + diff * 2))
@@ -188,18 +195,17 @@ class OrderbookStrategy(Strategy):
             LogColor.GREEN,
         )
         self._notify_telegram(f"{label} - Created", instrument.id, text)
+        self._ob_liquidity.pop(instrument.id, None)
         return order_list
 
     def sell(self, instrument: Instrument, balance_free: Money, label: str):
-
-        ob = self.cache.order_book(instrument.id)
         bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
-        entry_price = ob.best_bid_price() or instrument.make_price(ob.midpoint())
+        entry_price = instrument.make_price(self._ema[instrument.id].value)
         sl_price = entry_price
-        for i in range(5):
+        for i in range(15):
             bar = self.cache.bar(bar_type, i)
             sl_price = max(sl_price, bar.high)
-        sl_price = instrument.make_price(sl_price + (instrument.price_increment * 10))
+        sl_price = instrument.make_price(entry_price + (sl_price - entry_price) * Decimal("1.2"))
         diff = sl_price - entry_price
         min_tp_price = entry_price * (1 - (instrument.taker_fee * Decimal("2.5")))
         tp_price = instrument.make_price(min(min_tp_price, entry_price - diff * 2))
@@ -226,6 +232,7 @@ class OrderbookStrategy(Strategy):
             f"Created bracket order for instrument: {instrument.id} with entry price: {entry_price}, stop-loss price: {sl_price}, take-profit price: {tp_price}, quantity: {quantity}",
             LogColor.GREEN,
         )
+        self._ob_liquidity.pop(instrument.id, None)
         return order_list
 
     def _notify_telegram(self, label: str, instrument_id: InstrumentId, text: str) -> None:
