@@ -14,6 +14,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/deploy.yml"
+      - "deploy/**"
   workflow_dispatch:
     inputs:
       service:
@@ -21,11 +22,12 @@ on:
         required: false
         default: "orderbook-live"
 
-# Run on a CodeBuild-hosted GitHub Actions runner. The CodeBuild project
-# must exist with the prefix `nautilus-deploy-runner` (see deploy/README.md).
-# ${{ github.run_id }} makes each workflow run pick a fresh runner slot.
-runs-on: codebuild-nautilus-deploy-runner-${{ github.run_id }}
-
+# Run on a CodeBuild-hosted GitHub Actions runner. The runner label format is:
+#     codebuild-<codebuild-project-name>-<run-id>-<run-attempt>
+# The <codebuild-project-name> MUST match the actual CodeBuild project name
+# in your AWS account (case-sensitive). See deploy/README.md.
+# ${{ github.run_id }} + ${{ github.run_attempt }} pick a fresh runner slot
+# per workflow run, and let retries reuse the same slot.
 permissions:
   id-token: write # required by aws-actions/configure-aws-credentials with role-to-assume
   contents: read
@@ -33,11 +35,12 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  S3_BUCKET: ${{ vars.DEPLOY_S3_BUCKET }}
   SERVICE: ${{ github.event.inputs.service || 'orderbook-live' }}
 
 jobs:
   build-and-deploy:
+    runs-on:
+      - codebuild-nautilus-deploy-runner-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,12 +66,6 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Sync docker-compose.yml to S3
-        # EC2's deploy.sh fetches the compose file from here so compose
-        # changes propagate without a manual SSH.
-        run: |
-          aws s3 cp docker-compose.yml s3://$S3_BUCKET/nautilus-lab/docker-compose.yml
-
       - name: Trigger EC2 deploy via SSM
         env:
           EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
@@ -76,17 +73,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Ship the repo's docker-compose.yml to EC2 as base64. Avoids the need
+          # for S3, git on the instance, or a deploy key — and ensures the
+          # compose file on the EC2 always matches the one in the repo root.
+          COMPOSE_B64=$(base64 -w0 docker-compose.yml)
+
+          PARAMS=$(cat <<EOF
+          {
+            "commands": [
+              "set -euo pipefail",
+              "echo '${COMPOSE_B64}' | base64 -d > /opt/nautilus-lab/docker-compose.yml",
+              "export AWS_REGION='${AWS_REGION}'",
+              "export ECR_REGISTRY='${ECR_REGISTRY}'",
+              "export ECR_REPOSITORY='${ECR_REPOSITORY}'",
+              "/opt/nautilus-lab/deploy.sh '${SERVICE}'"
+            ]
+          }
+          EOF
+          )
+
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters commands='[
-              "set -euo pipefail",
-              "export AWS_REGION='"$AWS_REGION"'",
-              "export ECR_REGISTRY='"$ECR_REGISTRY"'",
-              "export ECR_REPOSITORY='"$ECR_REPOSITORY"'",
-              "export COMPOSE_S3_URI=s3://'"$S3_BUCKET"'/nautilus-lab/docker-compose.yml",
-              "/opt/nautilus-lab/deploy.sh '"$SERVICE"'"
-            ]' \
+            --parameters "$PARAMS" \
             --timeout-seconds 600 \
             --query 'Command.CommandId' \
             --output text)

@@ -13,6 +13,11 @@ restarts `orderbook-live`.
                          └────── SSM send-command ──────────┘
 ```
 
+The workflow ships the repo's `docker-compose.yml` to the EC2 instance on
+each deploy (base64'd inside the SSM command), so changes to the compose
+file at the repo root propagate automatically without S3, git credentials,
+or extra IAM permissions.
+
 ## One-time AWS setup
 
 ### 1. ECR repository
@@ -22,13 +27,7 @@ aws ecr create-repository --repository-name nautilus-lab --region eu-west-1
 # note the registry URI, e.g. 123456789012.dkr.ecr.eu-west-1.amazonaws.com
 ```
 
-### 2. S3 bucket for compose file sync
-
-```bash
-aws s3 mb s3://your-deploy-bucket --region eu-west-1
-```
-
-### 3. SSM Parameter Store (Telegram secrets, SecureString)
+### 2. SSM Parameter Store (Telegram secrets, SecureString)
 
 ```bash
 aws ssm put-parameter --name /nautilus-lab/telegram/bot-token \
@@ -37,7 +36,7 @@ aws ssm put-parameter --name /nautilus-lab/telegram/chat-ids \
   --value "<your-chat-id>" --type SecureString --region eu-west-1
 ```
 
-### 4. GitHub OIDC role for the workflow
+### 3. GitHub OIDC role for the workflow
 
 ```bash
 # OIDC provider (one per AWS account):
@@ -64,8 +63,8 @@ Trust policy for the role (`trust-policy.json`):
 }
 ```
 
-Then create the role and attach an inline policy that grants ECR push,
-SSM send-command on the EC2 instance, and S3 put on the deploy bucket:
+Then create the role and attach an inline policy that grants ECR push
+and SSM send-command on the EC2 instance:
 
 ```json
 {
@@ -91,11 +90,6 @@ SSM send-command on the EC2 instance, and S3 put on the deploy bucket:
         "arn:aws:ssm:eu-west-1:<account-id>:document/AWS-RunShellScript",
         "arn:aws:ec2:eu-west-1:<account-id>:instance/<ec2-instance-id>"
       ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:PutObject"],
-      "Resource": "arn:aws:s3:::your-deploy-bucket/nautilus-lab/*"
     }
   ]
 }
@@ -103,7 +97,7 @@ SSM send-command on the EC2 instance, and S3 put on the deploy bucket:
 
 Save the role ARN as the GitHub secret `AWS_DEPLOY_ROLE_ARN`.
 
-### 5. CodeBuild project (the "runner")
+### 4. CodeBuild project (the "runner")
 
 This is the AWS-side counterpart to `runs-on:` in the workflow.
 
@@ -114,15 +108,17 @@ This is the AWS-side counterpart to `runs-on:` in the workflow.
 #     Project name: nautilus-deploy-runner
 #     Source: GitHub → connect to ignamlrz/nautilus-lab
 #     Environment image: aws/codebuild/standard:7.0
-#     Service role: new role with ECR + logs + S3 permissions
-#     (no buildspec needed — GitHub Actions runner ignores it)
+#     Service role: new role with the AWSCodeBuildDeveloperAccess
+#       managed policy
+#     (no buildspec needed — the placeholder buildspec.yml in the repo
+#      satisfies the validation step; the actual logic is in the workflow)
 ```
 
 Enable it as a GitHub Actions runner for your repo/org under
 **CodeBuild → Settings → Action runner**. See the
 [AWS docs](https://docs.aws.amazon.com/codebuild/latest/userguide/action-runner.html).
 
-### 6. EC2 instance
+### 5. EC2 instance
 
 - AMI: **Amazon Linux 2023** (or any AL2/AL2023 with SSM agent by default)
 - Instance type: `t3.small` is fine for the live bot, `t3.medium` for backtests
@@ -146,11 +142,6 @@ Enable it as a GitHub Actions runner for your repo/org under
         "Effect": "Allow",
         "Action": ["ssm:GetParameter"],
         "Resource": "arn:aws:ssm:eu-west-1:<account-id>:parameter/nautilus-lab/telegram/*"
-      },
-      {
-        "Effect": "Allow",
-        "Action": ["s3:GetObject"],
-        "Resource": "arn:aws:s3:::your-deploy-bucket/nautilus-lab/*"
       }
     ]
   }
@@ -164,7 +155,7 @@ Enable it as a GitHub Actions runner for your repo/org under
 
 - Tag the instance with `Name=nautilus-bot` (or whatever) so it's easy to find.
 
-### 7. GitHub repo settings
+### 6. GitHub repo settings
 
 **Variables** (repo → Settings → Secrets and variables → Actions → Variables):
 
@@ -172,14 +163,13 @@ Enable it as a GitHub Actions runner for your repo/org under
 |---|---|
 | `AWS_REGION` | `eu-west-1` |
 | `ECR_REPOSITORY` | `nautilus-lab` |
-| `DEPLOY_S3_BUCKET` | `your-deploy-bucket` |
 
 **Secrets**:
 
 | Name | Value |
 |---|---|
-| `AWS_DEPLOY_ROLE_ARN` | the role ARN from step 4 |
-| `EC2_INSTANCE_ID` | `i-0abc123...` from step 6 |
+| `AWS_DEPLOY_ROLE_ARN` | the role ARN from step 3 |
+| `EC2_INSTANCE_ID` | `i-0abc123...` from step 5 |
 
 ## Daily workflow
 
@@ -192,14 +182,13 @@ The workflow:
 
 1. Builds the Docker image from `Dockerfile`
 2. Pushes it to ECR (tagged with `latest` and the commit SHA)
-3. Copies `docker-compose.yml` to S3
-4. SSMs the EC2 instance to run `deploy.sh`, which:
-   - Refreshes `.env` from Parameter Store
-   - Pulls `docker-compose.yml` from S3
-   - Authenticates Docker against ECR
-   - Pulls the new image
-   - Restarts the `orderbook-live` service
-   - Prunes dangling images
+3. SSMs the EC2 instance to:
+   - Write the repo's `docker-compose.yml` to `/opt/nautilus-lab/`
+   - Refresh `.env` from Parameter Store
+   - Authenticate Docker against ECR
+   - Pull the new image
+   - Restart the configured service (default: `orderbook-live`)
+   - Prune dangling images
 
 ## Manual deploy
 

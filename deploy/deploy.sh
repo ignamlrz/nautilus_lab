@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Runs on the EC2 instance, invoked by SSM from the GitHub Actions workflow.
 #
-# Refreshes .env from SSM Parameter Store, pulls the latest docker-compose.yml
-# from S3, pulls the new image from ECR, and (re)starts the requested service.
+# Refreshes .env from SSM Parameter Store, authenticates Docker against ECR,
+# pulls the latest image, and (re)starts the requested service.
+#
+# The docker-compose.yml is shipped by the workflow (base64'd via SSM) and
+# written to /opt/nautilus-lab/ before this script runs.
 
 set -euo pipefail
 
@@ -10,7 +13,6 @@ SERVICE="${1:-orderbook-live}"
 REGION="${AWS_REGION:-eu-west-1}"
 ECR_REGISTRY="${ECR_REGISTRY:?ECR_REGISTRY must be exported by the caller}"
 ECR_REPOSITORY="${ECR_REPOSITORY:?ECR_REPOSITORY must be exported by the caller}"
-COMPOSE_S3_URI="${COMPOSE_S3_URI:-}"
 
 cd /opt/nautilus-lab
 
@@ -23,11 +25,6 @@ ECR_REGISTRY=$ECR_REGISTRY
 ECR_REPOSITORY=$ECR_REPOSITORY
 EOF
 chmod 600 .env
-
-# ---- Refresh docker-compose.yml from S3 -----------------------------------
-if [ -n "$COMPOSE_S3_URI" ]; then
-  aws s3 cp "$COMPOSE_S3_URI" docker-compose.yml
-fi
 
 # ---- Authenticate Docker against ECR --------------------------------------
 aws ecr get-login-password --region "$REGION" | \
