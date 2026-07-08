@@ -1,0 +1,9 @@
+version: 0.2
+# Placeholder buildspec. CodeBuild's DOWNLOAD_SOURCE phase requires a
+# buildspec.yml to exist at the repo root, but it is not executed when
+# CodeBuild is used as a GitHub Actions runner. The real build and deploy
+# logic lives in .github/workflows/deploy.yml.
+phases:
+  build:
+    commands:
+      - echo "buildspec.yml is a placeholder for the Action Runner feature; see .github/workflows/deploy.yml"
