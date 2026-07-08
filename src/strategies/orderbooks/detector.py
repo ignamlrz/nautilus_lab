@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -14,6 +15,7 @@ from nautilus_trader.indicators import VolumeWeightedAveragePrice
 from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.custom import customdataclass
+from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import DataType
 from nautilus_trader.model.data import FundingRateUpdate
@@ -35,6 +37,13 @@ class OrderBookLiquidityData(Data):
     label: str
     order_side: str
     ratios: str
+
+
+@dataclass
+class OpeningMarketData(Data):
+    next_epoch: pd.Timestamp
+    high_price: float
+    low_price: float
 
 
 class OrderBookLiquidityDetectorConfig(ActorConfig, frozen=True):
@@ -88,6 +97,7 @@ class OrderBookLiquidityDetector(Actor):
         self._atr: dict[InstrumentId, AverageTrueRange] = {}
         self._vwap: dict[InstrumentId, VolumeWeightedAveragePrice] = {}
         self._ema_volume: dict[InstrumentId, SimpleMovingAverage] = {}
+        self._opening_market_data: dict[InstrumentId, OpeningMarketData] = {}
 
     def _notify_signal(self, label: str, trade: TradeTick, ratios: list[float]) -> None:
         order_side = OrderSide.BUY if "BUY" in label else OrderSide.SELL
@@ -318,10 +328,41 @@ class OrderBookLiquidityDetector(Actor):
                     params=self.config.subscribe_params,
                 )
 
+    def build_opening_market_data(self, bar: Bar) -> None:
+        """
+        Actions to be performed when the actor is running and receives a bar.
+        """
+        if bar.bar_type.instrument_id not in self._opening_market_data:
+            bar_ts = unix_nanos_to_dt(bar.ts_event).value
+            diff = bar.ts_event % pd.Timedelta(hours=8).value
+            next_epoch = pd.Timestamp(bar_ts - diff) + pd.Timedelta(hours=8)
+            self._opening_market_data[bar.bar_type.instrument_id] = OpeningMarketData(
+                next_epoch=next_epoch,
+                high_price=bar.high,
+                low_price=bar.low,
+            )
+        else:
+            opening_data = self._opening_market_data[bar.bar_type.instrument_id]
+            if bar.ts_event >= opening_data.next_epoch.value:
+                next_epoch = opening_data.next_epoch + pd.Timedelta(hours=8)
+                self._opening_market_data[bar.bar_type.instrument_id] = OpeningMarketData(
+                    next_epoch=next_epoch,
+                    high_price=bar.high,
+                    low_price=bar.low,
+                )
+            else:
+                opening_data.high_price = max(opening_data.high_price, bar.high)
+                opening_data.low_price = min(opening_data.low_price, bar.low)
+
+    def on_bars(self, bar: Bar) -> None:
+        self.build_opening_market_data(bar)
+
     def on_historical_data(self, data: Any) -> None:
         """
         Actions to be performed when the actor is running and receives historical data.
         """
+        if isinstance(data, Bar):
+            self.build_opening_market_data(data)
         if self.config.log_data:
             self.log.info("Historical " + repr(data), LogColor.CYAN)
 
@@ -415,10 +456,24 @@ class OrderBookLiquidityDetector(Actor):
         atr = self._atr[trade.instrument_id].value
         bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
         big_bar_found = None
+        if not atr or not vwap:
+            return
         for i in range(4):
             bar = self.cache.bar(bar_type, i)
+            opening_data = self._opening_market_data.get(trade.instrument_id)
             diff = bar.high - bar.low
-            if atr and diff.as_double() > atr * 2.1:
+            if (
+                bar.high > opening_data.high_price
+                and diff.as_double() > atr * 2.2
+                or bar.high < opening_data.low_price
+                and bar.close > bar.open
+                and diff.as_double() > atr * 5
+                or bar.low < opening_data.low_price
+                and diff.as_double() > atr * 2.2
+                or bar.low > opening_data.high_price
+                and bar.close < bar.open
+                and diff.as_double() > atr * 5
+            ):
                 big_bar_found = bar
                 break
         self.log.info(
