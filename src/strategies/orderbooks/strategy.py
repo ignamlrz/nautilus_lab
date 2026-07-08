@@ -56,12 +56,11 @@ class OrderbookStrategy(Strategy):
             self.unsubscribe_bars(bar_type=bar_type, client_id=self.config.client_id)
 
     def setup_indicators(self, instrument_id: InstrumentId) -> None:
-        self._rsi[instrument_id] = rsi = RelativeStrengthIndex(
+        self._rsi[instrument_id] = RelativeStrengthIndex(
             period=14, ma_type=MovingAverageType.WILDER
         )
         self._ema[instrument_id] = ema = ExponentialMovingAverage(period=15)
         bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
-        self.register_indicator_for_bars(bar_type, rsi)
         self.register_indicator_for_bars(bar_type, ema)
         self.request_bars(
             bar_type=bar_type,
@@ -73,10 +72,18 @@ class OrderbookStrategy(Strategy):
             client_id=self.config.client_id,
         )
 
+    def update_rsi(self, bar: Bar) -> None:
+        instrument_id = bar.bar_type.instrument_id
+        rsi = self._rsi[instrument_id]
+        value = (bar.close + bar.high + bar.low + bar.open).as_double() / 4
+        rsi.update_raw(value)
+
     def on_bar(self, bar: Bar):
         instrument_id = bar.bar_type.instrument_id
         if instrument_id not in self._ob_liquidity:
             return
+        if bar.bar_type.spec.timedelta == pd.Timedelta(minutes=1):
+            self.update_rsi(bar)
         data = self._ob_liquidity[instrument_id]
         rsi = self._rsi[instrument_id]
         ema = self._ema[instrument_id]
@@ -145,6 +152,8 @@ class OrderbookStrategy(Strategy):
             self.sell(instrument, balance_free, label=data.label)
 
     def on_data(self, data):
+        if isinstance(data, Bar):
+            self.update_rsi(data)
         if isinstance(data, OrderBookLiquidityData):
             # check if has indicators initialized
             if data.instrument_id not in self._rsi or data.instrument_id not in self._ema:

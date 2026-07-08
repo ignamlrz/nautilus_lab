@@ -1,0 +1,100 @@
+# Compose file for the Nautilus Trader lab. One image, multiple nodes — each
+# service reuses the same Dockerfile but points the entrypoint at different
+# (-c, -s) config pairs via the `command:` override.
+#
+# Usage:
+#   docker compose build                          # build the image once
+#   docker compose up -d orderbook-live          # start one live node
+#   docker compose up orderbook-backtest          # run a backtest (exits when done)
+#   docker compose up -d                          # start all live nodes (backtests
+#                                                 # exit immediately because of
+#                                                 # restart: "no")
+#   docker compose logs -f orderbook-live
+#
+# Telegram credentials live in .env at the repo root:
+#   TELEGRAM_BOT_TOKEN=...
+#   TELEGRAM_CHAT_IDS=...
+#
+# Logs are bind-mounted to ./logs/<service>/ so they survive container restarts.
+
+name: nautilus-lab
+
+services:
+  # ---------------------------------------------------------------------------
+  # Live nodes — long-running, restart on failure.
+  # Start with:  docker compose up -d <service>
+  # ---------------------------------------------------------------------------
+
+  orderbook-live:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nautilus-lab:latest
+    container_name: nautilus-orderbook-live
+    command:
+      - "-c"
+      - "/app/config/system/binance-paper-trading.yaml"
+      - "-s"
+      - "/app/config/strategies/orderbook-detector.yaml"
+    env_file: [.env]
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./logs/orderbook-live:/app/logs
+    restart: unless-stopped
+    # The trading loop doesn't expose an HTTP port by default. Adjust or
+    # remove this block if you front it with the API server in src/api/server/.
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  data-tester-live:
+    image: nautilus-lab:latest
+    container_name: nautilus-data-tester-live
+    command:
+      - "-c"
+      - "/app/config/system/binance-paper-trading.yaml"
+      - "-s"
+      - "/app/config/strategies/data-tester.yaml"
+    env_file: [.env]
+    volumes:
+      - ./logs/data-tester-live:/app/logs
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Backtest nodes — short-lived, run on demand.
+  # Start with:  docker compose run --rm orderbook-backtest
+  # They exit when the backtest finishes (restart: "no" prevents auto-restart).
+  # ---------------------------------------------------------------------------
+
+  orderbook-backtest:
+    image: nautilus-lab:latest
+    container_name: nautilus-orderbook-backtest
+    command:
+      - "-c"
+      - "/app/config/system/backtest.yaml"
+      - "-s"
+      - "/app/config/strategies/orderbook-detector.yaml"
+    env_file: [.env]
+    volumes:
+      - ./logs/orderbook-backtest:/app/logs
+      # Backtest artifacts (trades, equity curves) — bind-mount so they
+      # persist outside the container.
+      - ./artifacts/orderbook-backtest:/app/artifacts
+    restart: "no"
+
+  data-tester-backtest:
+    image: nautilus-lab:latest
+    container_name: nautilus-data-tester-backtest
+    command:
+      - "-c"
+      - "/app/config/system/backtest.yaml"
+      - "-s"
+      - "/app/config/strategies/data-tester.yaml"
+    env_file: [.env]
+    volumes:
+      - ./logs/data-tester-backtest:/app/logs
+      - ./artifacts/data-tester-backtest:/app/artifacts
+    restart: "no"

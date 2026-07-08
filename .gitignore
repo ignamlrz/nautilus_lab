@@ -5,9 +5,15 @@
 !src/
 !tests/
 !config/
+!.github/
+!deploy/
 
 !.gitignore
 !.pre-commit-config.yaml
+!.python-version
+!.dockerignore
+!docker-compose.yml
+!Dockerfile
 !CLAUDE.md
 !main.py
 !pyproject.toml
