@@ -168,12 +168,44 @@ class OrderbookStrategy(Strategy):
                     self.sell(instrument, balance_free, label=data.label)
                     break
 
+    def prev_bars_was_below_ema(self, data: OrderBookLiquidityData) -> bool:
+        instrument_id = data.instrument_id
+        bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
+        if data.order_side == OrderSide.BUY:
+            for i in range(4, 14):
+                bar0 = self.cache.bar(bar_type, i)
+                bar1 = self.cache.bar(bar_type, i + 1)
+                ema0 = self._ema_history[instrument_id][i]
+                ema1 = self._ema_history[instrument_id][i + 1]
+                if bar0.low > ema0 and bar1.low > ema1:
+                    return True
+        elif data.order_side == OrderSide.SELL:
+            for i in range(4, 14):
+                bar0 = self.cache.bar(bar_type, i)
+                bar1 = self.cache.bar(bar_type, i + 1)
+                ema0 = self._ema_history[instrument_id][i]
+                ema1 = self._ema_history[instrument_id][i + 1]
+                if bar0.high < ema0 and bar1.high < ema1:
+                    return True
+        return False
+
     def on_data(self, data):
         if isinstance(data, OrderBookLiquidityData):
             # check if has indicators initialized
             if data.instrument_id not in self._rsi or data.instrument_id not in self._ema:
                 self.setup_indicators(data.instrument_id)
 
+            if data.order_side == OrderSide.NO_ORDER_SIDE:
+                self._notify_telegram("ℹ️ INFO", data.instrument_id, data.label)
+                return
+
+            if not self.prev_bars_was_below_ema(data):
+                self.log.info(
+                    f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
+                )
+                text = f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
+                self._notify_telegram(data.label, data.instrument_id, text=text)
+                return
             self._ob_liquidity[data.instrument_id] = data
             self.log.info(
                 f"Received signal: {data.label} for instrument: {data.instrument_id} with ratios: {data.ratios}"

@@ -1,4 +1,6 @@
+import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -10,7 +12,7 @@ from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.data import Data
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.indicators import AverageTrueRange
-from nautilus_trader.indicators import SimpleMovingAverage
+from nautilus_trader.indicators import Swings
 from nautilus_trader.indicators import VolumeWeightedAveragePrice
 from nautilus_trader.indicators.averages import MovingAverageType
 from nautilus_trader.model.book import OrderBook
@@ -24,7 +26,9 @@ from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import OrderBookDepth10
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.enums import InstrumentClass
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
@@ -41,9 +45,64 @@ class OrderBookLiquidityData(Data):
 
 @dataclass
 class OpeningMarketData(Data):
+    tz: str
+    start_date: pd.Timestamp
+    end_date: pd.Timestamp
     next_epoch: pd.Timestamp
     high_price: float
     low_price: float
+    rebased_top: bool = False
+    rebased_low: bool = False
+    rebased_top_length: int = -1
+    rebased_low_length: int = -1
+    last_high_length: int = 0
+    last_low_length: int = 0
+    active: bool = False
+
+    @classmethod
+    def create(cls, market_data: dict, bar: Bar):
+        midnight = unix_nanos_to_dt(bar.ts_event).tz_convert(market_data["tz"]).normalize()
+        midnight_next = (
+            (unix_nanos_to_dt(bar.ts_event) + pd.Timedelta(days=1))
+            .tz_convert(market_data["tz"])
+            .normalize()
+        )
+        start_date = (midnight + market_data["start"]).tz_convert("UTC")
+        end_date = (midnight + market_data["end"]).tz_convert("UTC")
+        next_epoch = (midnight_next + market_data["start"]).tz_convert("UTC")
+        bar_on_market = (bar.ts_event >= start_date.value) and (bar.ts_event < end_date.value)
+        return cls(
+            tz=market_data["tz"],
+            start_date=start_date,
+            end_date=end_date,
+            next_epoch=next_epoch,
+            high_price=bar.high if bar_on_market else -math.inf,
+            low_price=bar.low if bar_on_market else math.inf,
+        )
+
+
+MINIMUM_PRICE = {
+    (AssetClass.CRYPTOCURRENCY, InstrumentClass.SPOT): 25_000,
+    (AssetClass.CRYPTOCURRENCY, InstrumentClass.SWAP): 20_000,
+}
+
+MARKETS = {
+    "SSE/SZSE": {
+        "tz": "Asia/Hong_Kong",
+        "start": pd.Timedelta(hours=8, minutes=30),
+        "end": pd.Timedelta(hours=15, minutes=0),
+    },
+    "LSE": {
+        "tz": "Europe/London",
+        "start": pd.Timedelta(hours=8, minutes=0),
+        "end": pd.Timedelta(hours=15, minutes=0),
+    },
+    "NYSE": {
+        "tz": "America/New_York",
+        "start": pd.Timedelta(hours=9, minutes=30),
+        "end": pd.Timedelta(hours=16, minutes=0),
+    },
+}
 
 
 class OrderBookLiquidityDetectorConfig(ActorConfig, frozen=True):
@@ -96,14 +155,21 @@ class OrderBookLiquidityDetector(Actor):
         self._books: dict[InstrumentId, OrderBook] = {}
         self._atr: dict[InstrumentId, AverageTrueRange] = {}
         self._vwap: dict[InstrumentId, VolumeWeightedAveragePrice] = {}
-        self._ema_volume: dict[InstrumentId, SimpleMovingAverage] = {}
-        self._opening_market_data: dict[InstrumentId, OpeningMarketData] = {}
+        self._swings30m: dict[InstrumentId, Swings] = {}
+        self._swings1h: dict[InstrumentId, Swings] = {}
+        self._swings_greater: dict[InstrumentId, Swings] = {}
+        self._opening_market_data: dict[InstrumentId, dict[str, OpeningMarketData]] = {}
+        self._open_markets: dict[InstrumentId, list[str]] = {}
 
-    def _notify_signal(self, label: str, trade: TradeTick, ratios: list[float]) -> None:
-        order_side = OrderSide.BUY if "BUY" in label else OrderSide.SELL
+    def _notify_signal(self, label: str, instrument_id: InstrumentId, ratios: list[float]) -> None:
+        order_side = (
+            OrderSide.BUY
+            if "BUY" in label
+            else (OrderSide.SELL if "SELL" in label else OrderSide.NO_ORDER_SIDE)
+        )
         ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
         data = OrderBookLiquidityData(
-            instrument_id=trade.instrument_id,
+            instrument_id=instrument_id,
             label=label,
             order_side=order_side,
             ratios=ratios_str,
@@ -248,18 +314,23 @@ class OrderBookLiquidityDetector(Actor):
         self._atr[instrument_id] = atr = AverageTrueRange(
             period=60, ma_type=MovingAverageType.WILDER
         )
-        self._ema_volume[instrument_id] = SimpleMovingAverage(period=50)
+        self._swings30m[instrument_id] = swings30m = Swings(period=30)
+        self._swings1h[instrument_id] = swings1h = Swings(period=60)
+        self._swings_greater[instrument_id] = swings_greater = Swings(period=240)
         bar_type = BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")
         self.register_indicator_for_bars(bar_type, vwap)
         self.register_indicator_for_bars(bar_type, atr)
+        self.register_indicator_for_bars(bar_type, swings30m)
+        self.register_indicator_for_bars(bar_type, swings1h)
+        self.register_indicator_for_bars(bar_type, swings_greater)
         self.request_bars(
             bar_type=bar_type,
             start=self.clock.utc_now() - pd.Timedelta(minutes=1440),
             client_id=self.config.client_id,
-        )
-        self.subscribe_bars(
-            bar_type=bar_type,
-            client_id=self.config.client_id,
+            callback=lambda _: self.subscribe_bars(
+                bar_type=bar_type,
+                client_id=self.config.client_id,
+            ),
         )
 
     def on_stop(self) -> None:  # noqa: C901 (too complex)
@@ -328,43 +399,182 @@ class OrderBookLiquidityDetector(Actor):
                     params=self.config.subscribe_params,
                 )
 
+    def create_opening_market_data(self, bar: Bar) -> None:
+        """
+        Create opening market data for the given instrument.
+        """
+        if bar.bar_type.instrument_id not in self._opening_market_data:
+            self._opening_market_data[bar.bar_type.instrument_id] = {}
+            self._open_markets[bar.bar_type.instrument_id] = []
+        for market in MARKETS:
+            if market not in self._opening_market_data[bar.bar_type.instrument_id]:
+                self._opening_market_data[bar.bar_type.instrument_id][market] = (
+                    OpeningMarketData.create(market_data=MARKETS[market], bar=bar)
+                )
+
     def build_opening_market_data(self, bar: Bar) -> None:
         """
         Actions to be performed when the actor is running and receives a bar.
         """
+        open_markets = []
         if bar.bar_type.instrument_id not in self._opening_market_data:
-            # bar_ts = unix_nanos_to_dt(bar.ts_event).value
-            # diff = bar.ts_event % pd.Timedelta(hours=8).value
-            # TODO: next epoch must be newyork time 0, 8, 16 but on UTC
-            next_epoch = unix_nanos_to_dt(bar.ts_event).tz_convert("America/New_York").floor(
-                "8h"
-            ).tz_convert("UTC") + pd.Timedelta(hours=8)
-            self._opening_market_data[bar.bar_type.instrument_id] = OpeningMarketData(
-                next_epoch=next_epoch,
-                high_price=bar.high,
-                low_price=bar.low,
-            )
+            self.create_opening_market_data(bar)
         else:
-            opening_data = self._opening_market_data[bar.bar_type.instrument_id]
-            if bar.ts_event >= opening_data.next_epoch.value:
-                next_epoch = opening_data.next_epoch + pd.Timedelta(hours=8)
-                self._opening_market_data[bar.bar_type.instrument_id] = OpeningMarketData(
-                    next_epoch=next_epoch,
-                    high_price=bar.high,
-                    low_price=bar.low,
+            for market in self.open_markets_sorted(bar.bar_type.instrument_id):
+                opening_data = self._opening_market_data[bar.bar_type.instrument_id][market]
+                if bar.ts_event >= opening_data.next_epoch.value:
+                    opening_data = OpeningMarketData.create(market_data=MARKETS[market], bar=bar)
+                    self._opening_market_data[bar.bar_type.instrument_id][market] = opening_data
+                bar_on_market = (bar.ts_event >= opening_data.start_date.value) and (
+                    bar.ts_event < opening_data.end_date.value
+                )
+                if bar_on_market:
+                    opening_data.active = True
+                    if bar.high > opening_data.high_price:
+                        opening_data.high_price = bar.high
+                        opening_data.last_high_length = 0
+                    else:
+                        opening_data.last_high_length += 1
+                    if bar.low < opening_data.low_price:
+                        opening_data.low_price = bar.low
+                        opening_data.last_low_length = 0
+                    else:
+                        opening_data.last_low_length += 1
+                    open_markets.append(market)
+                else:
+                    opening_data.active = False
+                    opening_data.last_low_length += 1
+                    opening_data.last_high_length += 1
+                    if opening_data.rebased_low:
+                        opening_data.rebased_low_length += 1
+                    if bar.low <= opening_data.low_price and not math.isinf(opening_data.low_price):
+                        opening_data.rebased_low = True
+                        opening_data.rebased_low_length = 0
+
+                    if opening_data.rebased_top:
+                        opening_data.rebased_top_length += 1
+                    if bar.high >= opening_data.high_price and not math.isinf(
+                        opening_data.high_price
+                    ):
+                        opening_data.rebased_top = True
+                        opening_data.rebased_top_length = 0
+
+            self._open_markets[bar.bar_type.instrument_id] = open_markets
+
+    def on_bar(self, bar: Bar) -> None:
+        if "1-MINUTE" not in str(bar.bar_type.spec):
+            return
+        self.build_opening_market_data(bar)
+        swing30m = self._swings30m[bar.bar_type.instrument_id]
+        swing1h = self._swings1h[bar.bar_type.instrument_id]
+
+        if swing1h.changed:
+            self._notify_signal(
+                f"CHoC confirmed on 1m: {'UP' if swing1h.direction == 1 else 'DOWN'} (#{swing1h.duration} bars)",
+                bar.bar_type.instrument_id,
+                ratios=[],
+            )
+        atr = self._atr[bar.bar_type.instrument_id].value
+
+        final_decision_order = OrderSide.NO_ORDER_SIDE
+        final_decision_label = ""
+        for m in self.open_markets_sorted(bar.bar_type.instrument_id):
+            opening_data = self._opening_market_data[bar.bar_type.instrument_id][m]
+            if opening_data.active:
+                recently_top = (
+                    opening_data.last_high_length >= 0 and opening_data.last_high_length < 60
+                )
+                recently_bottom = (
+                    opening_data.last_low_length >= 0 and opening_data.last_low_length < 60
                 )
             else:
-                opening_data.high_price = max(opening_data.high_price, bar.high)
-                opening_data.low_price = min(opening_data.low_price, bar.low)
+                recently_top = (
+                    opening_data.rebased_top_length >= 0 and opening_data.rebased_top_length < 60
+                )
+                recently_bottom = (
+                    opening_data.rebased_low_length >= 0 and opening_data.rebased_low_length < 60
+                )
 
-    def on_bars(self, bar: Bar) -> None:
-        self.build_opening_market_data(bar)
+            if recently_bottom and (
+                (swing1h.direction == 1 and swing1h.duration < 15)
+                or (swing30m.direction == 1 and swing30m.duration < 15)
+            ):
+                amplitude = bar.high - bar.low
+                high_wick_amplitude = bar.high - bar.close
+                body_amplitude = bar.open - bar.close if bar.open > bar.close else Decimal("0")
+                if amplitude.as_double() > atr * 1.3 and body_amplitude > high_wick_amplitude:
+                    final_decision_label = (
+                        f"Liquidity Collected on {m} confirmed with swing trading - [BUY]"
+                    )
+                    final_decision_order = OrderSide.BUY
+
+            if recently_top and (
+                (swing1h.direction == -1 and swing1h.duration < 15)
+                or (swing30m.direction == -1 and swing30m.duration < 15)
+            ):
+                amplitude = bar.high - bar.low
+                low_wick_amplitude = bar.close - bar.low
+                body_amplitude = bar.close - bar.open if bar.close > bar.open else Decimal("0")
+                if amplitude.as_double() > atr * 1.3 and body_amplitude > low_wick_amplitude:
+                    final_decision_label = (
+                        f"Liquidity Collected on {m} confirmed with swing trading - [SELL]"
+                    )
+                    final_decision_order = OrderSide.SELL
+
+        if final_decision_order == OrderSide.NO_ORDER_SIDE:
+            return
+
+        book = self.cache.order_book(bar.bar_type.instrument_id)
+        instrument = self.cache.instrument(bar.bar_type.instrument_id)
+        r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
+        r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
+        r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
+        self.log.info(
+            f"{bar.bar_type.instrument_id} -> {final_decision_label} ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+            LogColor.RED if final_decision_order == OrderSide.SELL else LogColor.GREEN,
+        )
+        self._notify_signal(final_decision_label, instrument.id, [r1, r2, r3])
 
     def on_historical_data(self, data: Any) -> None:
         """
         Actions to be performed when the actor is running and receives historical data.
         """
         if isinstance(data, Bar):
+            if "BTCUSDT" in str(data.bar_type):
+                swing30m = self._swings30m[data.bar_type.instrument_id]
+                swing1h = self._swings1h[data.bar_type.instrument_id]
+                if swing30m.changed:
+                    datetime = (
+                        swing30m.low_datetime
+                        if swing30m.direction == -1
+                        else swing30m.high_datetime
+                    )
+                    self.log.info(
+                        "Datetime: "
+                        + str(datetime)
+                        + " | Swing1m: "
+                        + str(swing30m.direction)
+                        + " ("
+                        + str(swing30m.length)
+                        + ")",
+                        LogColor.CYAN,
+                    )
+                if swing1h.changed:
+                    datetime = (
+                        swing1h.low_datetime if swing1h.direction == -1 else swing1h.high_datetime
+                    )
+                    self.log.info(
+                        "Datetime: "
+                        + str(datetime)
+                        + " | Swing1h: "
+                        + str(swing1h.direction)
+                        + " ("
+                        + str(swing1h.length)
+                        + ")",
+                        LogColor.YELLOW,
+                    )
+            if "1-MINUTE" not in str(data.bar_type.spec):
+                return
             self.build_opening_market_data(data)
         if self.config.log_data:
             self.log.info("Historical " + repr(data), LogColor.CYAN)
@@ -427,6 +637,9 @@ class OrderBookLiquidityDetector(Actor):
         """
         if self.config.log_data:
             self.log.info(repr(trade), LogColor.CYAN)
+        open_markets = self._open_markets.get(trade.instrument_id, [])
+        if not open_markets:
+            return
         book = self.cache.order_book(trade.instrument_id)
         book_best_bid_size = book.best_bid_size()
         book_best_ask_size = book.best_ask_size()
@@ -437,115 +650,161 @@ class OrderBookLiquidityDetector(Actor):
             return
         midpoint = book.midpoint()
         diff_price = midpoint * 0.00015
-        ema = self._ema_volume[trade.instrument_id]
-        ema.update_raw(trade.size.as_double())
-        minimum_size = instrument.make_qty(50_000 / midpoint)
-        if not ema.initialized:
+        minimum_size = instrument.make_qty(
+            MINIMUM_PRICE[(instrument.asset_class, instrument.instrument_class)] / midpoint
+        )
+        bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
+        last_cached_bar = self.cache.bar(bar_type)
+        if not last_cached_bar:
             return
+        volume15s_size = instrument.make_qty(last_cached_bar.volume / 4)
         if trade.aggressor_side == AggressorSide.BUYER:
             top_price = instrument.make_price(midpoint + diff_price)
-            signal_size = instrument.make_qty(book.get_quantity_for_price(top_price, OrderSide.BUY))
+            ob_size = instrument.make_qty(book.get_quantity_for_price(top_price, OrderSide.BUY))
         else:
             bottom_price = instrument.make_price(midpoint - diff_price)
-            signal_size = instrument.make_qty(
-                book.get_quantity_for_price(bottom_price, OrderSide.SELL)
-            )
-        if signal_size < minimum_size or signal_size < ema.value or trade.size < signal_size:
+            ob_size = instrument.make_qty(book.get_quantity_for_price(bottom_price, OrderSide.SELL))
+        signal_size = min(volume15s_size, ob_size)
+        # ignore lower trades
+        if trade.size < minimum_size or trade.size < signal_size:
             return
         r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
         r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
         r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
         vwap = self._vwap[trade.instrument_id].value
         atr = self._atr[trade.instrument_id].value
-        bar_type = BarType.from_str(f"{trade.instrument_id}-1-MINUTE-LAST-EXTERNAL")
-        big_bar_found = None
-        if not atr or not vwap:
-            return
-        for i in range(4):
-            bar = self.cache.bar(bar_type, i)
-            opening_data = self._opening_market_data.get(trade.instrument_id)
-            diff = bar.high - bar.low
-            if (
-                bar.high > opening_data.high_price
-                and diff.as_double() > atr * 2.2
-                or bar.high < opening_data.low_price
-                and bar.close > bar.open
-                and diff.as_double() > atr * 5
-                or bar.low < opening_data.low_price
-                and diff.as_double() > atr * 2.2
-                or bar.low > opening_data.high_price
-                and bar.close < bar.open
-                and diff.as_double() > atr * 5
-            ):
-                big_bar_found = bar
+
+        markets_rebased = set()
+        multiple_markets = len(open_markets) > 1
+        market_rebased_order_side = OrderSide.NO_ORDER_SIDE
+        final_decision_order = OrderSide.NO_ORDER_SIDE
+        final_decision_label = ""
+        for market in self.open_markets_sorted(trade.instrument_id):
+            opening_data = self._opening_market_data[trade.instrument_id][market]
+            if market in open_markets:
+                top_length = opening_data.last_high_length
+                low_length = opening_data.last_low_length
+                recently_rebased_top = (
+                    opening_data.last_high_length > 0 and opening_data.last_high_length < 5
+                )
+                recently_rebased_low = (
+                    opening_data.last_low_length > 0 and opening_data.last_low_length < 5
+                )
+            else:
+                top_length = opening_data.rebased_top_length
+                low_length = opening_data.rebased_low_length
+                recently_rebased_top = (
+                    opening_data.rebased_top_length > 0 and opening_data.rebased_top_length < 5
+                )
+                recently_rebased_low = (
+                    opening_data.rebased_low_length > 0 and opening_data.rebased_low_length < 5
+                )
+            # both, betther not trade
+            if recently_rebased_top and recently_rebased_low:
+                markets_rebased.add(market)
+                continue
+
+            if recently_rebased_top:
+                markets_rebased.add(market)
+                next_bar = self.cache.bar(bar_type, top_length)
+                bar = self.cache.bar(bar_type, top_length + 1)
+                if (next_bar.high - next_bar.low) > (bar.high - bar.low):
+                    bar = next_bar
+                    next_bar = self.cache.bar(bar_type, top_length - 1)
+
+                amplitude = bar.high - bar.low
+                diff_body = bar.close - bar.open if bar.close > bar.open else Decimal("0")
+                upper_wick = bar.high - bar.close
+                wick_is_bigger = (amplitude.as_double() > atr * 2.2) and upper_wick > diff_body
+                # reversal pattern
+                if wick_is_bigger and (bar.close > next_bar.close or diff_body == Decimal("0")):
+                    market_rebased_order_side = OrderSide.SELL
+
+            if recently_rebased_low:
+                markets_rebased.add(market)
+                next_bar = self.cache.bar(bar_type, low_length)
+                bar = self.cache.bar(bar_type, top_length + 1)
+                if (next_bar.high - next_bar.low) > (bar.high - bar.low):
+                    bar = next_bar
+                    next_bar = self.cache.bar(bar_type, low_length - 1)
+
+                amplitude = bar.high - bar.low
+                diff_body = bar.open - bar.close if bar.close < bar.open else Decimal("0")
+                lower_wick = bar.close - bar.low
+                wick_is_bigger = (amplitude.as_double() > atr * 2.2) and lower_wick > diff_body
+                # reversal pattern
+                if wick_is_bigger and (bar.close < next_bar.close or diff_body == Decimal("0")):
+                    market_rebased_order_side = OrderSide.BUY
+
+            if market_rebased_order_side != OrderSide.NO_ORDER_SIDE:
                 break
+
+        if market_rebased_order_side == OrderSide.NO_ORDER_SIDE:
+            return
+
+        swing30m = self._swings30m[trade.instrument_id]
+        swing1h = self._swings1h[trade.instrument_id]
+        # its rare see all BUY, maybe FOMO
+        if market_rebased_order_side == OrderSide.BUY:
+            if (
+                trade.aggressor_side == AggressorSide.SELLER
+                and s1 == OrderSide.SELL
+                and s2 == OrderSide.SELL
+                and s3 == OrderSide.SELL
+                and (swing30m.direction == 1 or swing1h.direction == 1 or multiple_markets)
+            ):
+                final_decision_order = OrderSide.BUY
+                final_decision_label = (
+                    f"Liquidity Collected on {', '.join(markets_rebased)} - [BUY]"
+                )
+            if trade.aggressor_side == AggressorSide.SELLER and (
+                (s1 != OrderSide.SELL and s2 != OrderSide.BUY and s3 == OrderSide.BUY)
+                or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE and s3 != OrderSide.SELL)
+                and (swing30m.direction == 1 or swing1h.direction == 1)
+                and not multiple_markets
+            ):
+                final_decision_order = OrderSide.BUY
+                final_decision_label = f"Continue trend on {', '.join(markets_rebased)} - [BUY]"
+
+        # its rare see all BUY, maybe FOMO
+        if market_rebased_order_side == OrderSide.SELL:
+            if (
+                trade.aggressor_side == AggressorSide.BUYER
+                and s1 == OrderSide.BUY
+                and s2 == OrderSide.BUY
+                and s3 == OrderSide.BUY
+                and (swing30m.direction == -1 or swing1h.direction == -1 or multiple_markets)
+            ):
+                final_decision_order = OrderSide.SELL
+                final_decision_label = (
+                    f"Liquidity Collected on {', '.join(markets_rebased)} - [SELL]"
+                )
+            if trade.aggressor_side == AggressorSide.BUYER and (
+                (s1 != OrderSide.BUY and s2 != OrderSide.SELL and s3 == OrderSide.SELL)
+                or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE and s3 != OrderSide.BUY)
+                and (swing30m.direction == -1 or swing1h.direction == -1)
+                and not multiple_markets
+            ):
+                final_decision_order = OrderSide.SELL
+                final_decision_label = f"Continue trend on {', '.join(markets_rebased)} - [SELL]"
+
+        if final_decision_order != OrderSide.NO_ORDER_SIDE:
+            self.log.info(
+                f"{trade.instrument_id} -> {final_decision_label} ({r1:.2%}, {r2:.2%}, {r3:.2%})",
+                LogColor.RED if final_decision_order == OrderSide.SELL else LogColor.GREEN,
+            )
+            self._notify_signal(final_decision_label, trade.instrument_id, [r1, r2, r3])
+
         self.log.info(
             f"{trade.instrument_id} -> [{trade.aggressor_side.name}]: "
             f"{trade.size} @ {trade.price} (> {signal_size * midpoint:.2f}$) "
             f"({s1.name}, {s2.name}, {s3.name}) | "
             f"VWAP: {vwap} | "
             f"ATR: {atr} | "
-            f"BigBarFound: {big_bar_found or 'None found'} ({unix_nanos_to_dt(big_bar_found.ts_event) if big_bar_found else ''})",
+            f"Swing30m: {swing30m.direction} ({swing30m.length}) | "
+            f"Swing1h: {swing1h.direction} ({swing1h.length}) | ",
             LogColor.NORMAL,
         )
-        # Bull/Bear trap signal
-        if (
-            trade.aggressor_side == AggressorSide.BUYER
-            and s3 == OrderSide.SELL
-            and (
-                (s2 == OrderSide.SELL and s1 != OrderSide.SELL)
-                or (s1 == OrderSide.BUY and s2 == OrderSide.NO_ORDER_SIDE)
-            )
-            and big_bar_found
-            and big_bar_found.close > big_bar_found.open
-            and trade.price > vwap
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Bull Trap - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.RED,
-            )
-            self._notify_signal("Bull Trap - [SELL]", trade, [r1, r2, r3])
-        elif (
-            trade.aggressor_side == AggressorSide.SELLER
-            and s3 == OrderSide.BUY
-            and (
-                (s2 == OrderSide.BUY and s1 != OrderSide.BUY)
-                or (s1 == OrderSide.SELL and s2 == OrderSide.NO_ORDER_SIDE)
-            )
-            and big_bar_found
-            and big_bar_found.close < big_bar_found.open
-            and trade.price < vwap
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Bear Trap - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.GREEN,
-            )
-            self._notify_signal("Bear Trap - [BUY]", trade, [r1, r2, r3])
-        # Continue trend signal
-        elif (
-            trade.aggressor_side == AggressorSide.BUYER
-            and s3 == OrderSide.BUY
-            and s2 == OrderSide.SELL
-            and s1 == OrderSide.BUY
-            and trade.price < vwap
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Continue Trend - [BUY] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.GREEN,
-            )
-            self._notify_signal("Continue Trend - [BUY]", trade, [r1, r2, r3])
-        elif (
-            trade.aggressor_side == AggressorSide.SELLER
-            and s3 == OrderSide.SELL
-            and s2 == OrderSide.BUY
-            and s1 == OrderSide.SELL
-            and trade.price > vwap
-        ):
-            self.log.info(
-                f"{trade.instrument_id} -> Continue Trend - [SELL] ({r1:.2%}, {r2:.2%}, {r3:.2%})",
-                LogColor.RED,
-            )
-            self._notify_signal("Continue Trend - [SELL]", trade, [r1, r2, r3])
 
     # generate method get the relation_qty given a float (for example 0.015) and make a log like this quantity given 0.015 - Botton Qty: 100 @ 100.0 | Top Qty: 200 @ 101.0
     def get_book_order_ratio(
@@ -590,3 +849,13 @@ class OrderBookLiquidityDetector(Actor):
         """
         if self.config.log_data:
             self.log.info(repr(funding_rate), LogColor.CYAN)
+
+    def open_markets_sorted(self, instrument_id: InstrumentId) -> list[str]:
+        """
+        Returns the list of opening markets for the given instrument.
+        """
+        markets = self._opening_market_data.get(instrument_id, {})
+        open_markets = self._open_markets.get(instrument_id, [])
+        return [m for m in markets if m not in open_markets] + [
+            m for m in markets if m in open_markets
+        ]
