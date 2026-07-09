@@ -89,18 +89,27 @@ MINIMUM_PRICE = {
 MARKETS = {
     "SSE/SZSE": {
         "tz": "Asia/Hong_Kong",
-        "start": pd.Timedelta(hours=8, minutes=30),
+        "start": pd.Timedelta(hours=8, minutes=0),
         "end": pd.Timedelta(hours=15, minutes=0),
+        "min_diff": 0.005,
     },
     "LSE": {
         "tz": "Europe/London",
         "start": pd.Timedelta(hours=8, minutes=0),
         "end": pd.Timedelta(hours=15, minutes=0),
+        "min_diff": 0.005,
     },
     "NYSE": {
         "tz": "America/New_York",
         "start": pd.Timedelta(hours=9, minutes=30),
         "end": pd.Timedelta(hours=16, minutes=0),
+        "min_diff": 0.005,
+    },
+    "POST_NYSE": {
+        "tz": "America/New_York",
+        "start": pd.Timedelta(hours=16, minutes=0),
+        "end": pd.Timedelta(hours=20, minutes=0),
+        "min_diff": 0.003,
     },
 }
 
@@ -467,13 +476,45 @@ class OrderBookLiquidityDetector(Actor):
         self.build_opening_market_data(bar)
         swing30m = self._swings30m[bar.bar_type.instrument_id]
         swing1h = self._swings1h[bar.bar_type.instrument_id]
+        book = self.cache.order_book(bar.bar_type.instrument_id)
+        instrument = self.cache.instrument(bar.bar_type.instrument_id)
+        r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
+        r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
+        r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
 
+        ratios = [r1, r2, r3]
         if swing1h.changed:
-            self._notify_signal(
-                f"CHoC confirmed on 1m: {'UP' if swing1h.direction == 1 else 'DOWN'} (#{swing1h.duration} bars)",
-                bar.bar_type.instrument_id,
-                ratios=[],
-            )
+            markets = self._open_markets[bar.bar_type.instrument_id]
+            for market in markets:
+                opening_data = self._opening_market_data[bar.bar_type.instrument_id][market]
+                last_high_bar = self.cache.bar(bar.bar_type, opening_data.last_high_length)
+                last_low_bar = self.cache.bar(bar.bar_type, opening_data.last_low_length)
+                diff = last_high_bar.high - last_low_bar.low
+                mid_session = last_low_bar.low + (diff / Decimal("2"))
+                diff_perp = diff / bar.close
+                if diff_perp > MARKETS[market]["min_diff"]:
+                    if (
+                        opening_data.last_high_length < opening_data.last_low_length
+                        and swing1h.direction == -1
+                        and swing1h.low_price > mid_session
+                    ):
+                        ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
+                        self._notify_signal(
+                            f"CHoC confirmed on 1m: ⬇️ (#{swing1h.duration} bars) | {market} | OB: [{ratios_str}]",
+                            bar.bar_type.instrument_id,
+                            ratios=ratios,
+                        )
+                    elif (
+                        opening_data.last_low_length < opening_data.last_high_length
+                        and swing1h.direction == 1
+                        and swing1h.high_price < mid_session
+                    ):
+                        ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
+                        self._notify_signal(
+                            f"CHoC confirmed on 1m: ⬆️ (#{swing1h.duration} bars) | {market} | OB: [{ratios_str}]",
+                            bar.bar_type.instrument_id,
+                            ratios=ratios,
+                        )
         atr = self._atr[bar.bar_type.instrument_id].value
 
         final_decision_order = OrderSide.NO_ORDER_SIDE
@@ -523,12 +564,6 @@ class OrderBookLiquidityDetector(Actor):
 
         if final_decision_order == OrderSide.NO_ORDER_SIDE:
             return
-
-        book = self.cache.order_book(bar.bar_type.instrument_id)
-        instrument = self.cache.instrument(bar.bar_type.instrument_id)
-        r1, s1 = self.get_book_order_ratio(book, instrument, diff=0.015)
-        r2, s2 = self.get_book_order_ratio(book, instrument, diff=0.07)
-        r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
         self.log.info(
             f"{bar.bar_type.instrument_id} -> {final_decision_label} ({r1:.2%}, {r2:.2%}, {r3:.2%})",
             LogColor.RED if final_decision_order == OrderSide.SELL else LogColor.GREEN,
