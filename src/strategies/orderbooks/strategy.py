@@ -148,7 +148,7 @@ class OrderbookStrategy(Strategy):
                 bar1 = self.cache.bar(bar.bar_type, i + 1)
                 ema0 = self._ema_history[instrument_id][i]
                 ema1 = self._ema_history[instrument_id][i + 1]
-                if bar0.close > ema0 and bar1.close > ema1:
+                if bar0.low > ema0 and bar1.low > ema1:
                     self.buy(instrument, balance_free, label=data.label)
                     break
         elif (
@@ -164,7 +164,7 @@ class OrderbookStrategy(Strategy):
                 bar1 = self.cache.bar(bar.bar_type, i + 1)
                 ema0 = self._ema_history[instrument_id][i]
                 ema1 = self._ema_history[instrument_id][i + 1]
-                if bar0.close < ema0 and bar1.close < ema1:
+                if bar0.high < ema0 and bar1.high < ema1:
                     self.sell(instrument, balance_free, label=data.label)
                     break
 

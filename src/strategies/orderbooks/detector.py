@@ -333,9 +333,12 @@ class OrderBookLiquidityDetector(Actor):
         Actions to be performed when the actor is running and receives a bar.
         """
         if bar.bar_type.instrument_id not in self._opening_market_data:
-            bar_ts = unix_nanos_to_dt(bar.ts_event).value
-            diff = bar.ts_event % pd.Timedelta(hours=8).value
-            next_epoch = pd.Timestamp(bar_ts - diff) + pd.Timedelta(hours=8)
+            # bar_ts = unix_nanos_to_dt(bar.ts_event).value
+            # diff = bar.ts_event % pd.Timedelta(hours=8).value
+            # TODO: next epoch must be newyork time 0, 8, 16 but on UTC
+            next_epoch = unix_nanos_to_dt(bar.ts_event).tz_convert("America/New_York").floor(
+                "8h"
+            ).tz_convert("UTC") + pd.Timedelta(hours=8)
             self._opening_market_data[bar.bar_type.instrument_id] = OpeningMarketData(
                 next_epoch=next_epoch,
                 high_price=bar.high,
