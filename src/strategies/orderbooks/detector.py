@@ -53,8 +53,8 @@ class OpeningMarketData(Data):
     low_price: float
     rebased_top: bool = False
     rebased_low: bool = False
-    rebased_top_length: int = -1
-    rebased_low_length: int = -1
+    rebased_top_length: int = math.inf
+    rebased_low_length: int = math.inf
     last_high_length: int = 0
     last_low_length: int = 0
     active: bool = False
@@ -91,25 +91,25 @@ MARKETS = {
         "tz": "Asia/Hong_Kong",
         "start": pd.Timedelta(hours=8, minutes=0),
         "end": pd.Timedelta(hours=15, minutes=0),
-        "min_diff": 0.005,
+        "min_diff": 0.004,
     },
     "LSE": {
         "tz": "Europe/London",
         "start": pd.Timedelta(hours=8, minutes=0),
         "end": pd.Timedelta(hours=15, minutes=0),
-        "min_diff": 0.005,
+        "min_diff": 0.004,
     },
     "NYSE": {
         "tz": "America/New_York",
         "start": pd.Timedelta(hours=9, minutes=30),
         "end": pd.Timedelta(hours=16, minutes=0),
-        "min_diff": 0.005,
+        "min_diff": 0.004,
     },
     "POST_NYSE": {
         "tz": "America/New_York",
         "start": pd.Timedelta(hours=16, minutes=0),
         "end": pd.Timedelta(hours=20, minutes=0),
-        "min_diff": 0.003,
+        "min_diff": 0.002,
     },
 }
 
@@ -456,13 +456,15 @@ class OrderBookLiquidityDetector(Actor):
                     opening_data.last_high_length += 1
                     if opening_data.rebased_low:
                         opening_data.rebased_low_length += 1
-                    if bar.low <= opening_data.low_price and not math.isinf(opening_data.low_price):
+                    elif bar.low <= opening_data.low_price and not math.isinf(
+                        opening_data.low_price
+                    ):
                         opening_data.rebased_low = True
                         opening_data.rebased_low_length = 0
 
                     if opening_data.rebased_top:
                         opening_data.rebased_top_length += 1
-                    if bar.high >= opening_data.high_price and not math.isinf(
+                    elif bar.high >= opening_data.high_price and not math.isinf(
                         opening_data.high_price
                     ):
                         opening_data.rebased_top = True
@@ -483,35 +485,66 @@ class OrderBookLiquidityDetector(Actor):
         r3, s3 = self.get_book_order_ratio(book, instrument, diff=0.33)
 
         ratios = [r1, r2, r3]
-        if swing1h.changed:
-            markets = self._open_markets[bar.bar_type.instrument_id]
-            for market in markets:
-                opening_data = self._opening_market_data[bar.bar_type.instrument_id][market]
-                last_high_bar = self.cache.bar(bar.bar_type, opening_data.last_high_length)
-                last_low_bar = self.cache.bar(bar.bar_type, opening_data.last_low_length)
+        if swing1h.changed or swing30m.changed:
+            market_rebased, data_rebased = self.most_recently_market_closed_rebased(
+                bar.bar_type.instrument_id
+            )
+            market_open, data_open = self.most_recently_market_open(bar.bar_type.instrument_id)
+            if market_rebased and data_rebased and market_open and data_open:
+                last_high_bar = self.cache.bar(bar.bar_type, data_open.last_high_length)
+                last_low_bar = self.cache.bar(bar.bar_type, data_open.last_low_length)
                 diff = last_high_bar.high - last_low_bar.low
-                mid_session = last_low_bar.low + (diff / Decimal("2"))
                 diff_perp = diff / bar.close
-                if diff_perp > MARKETS[market]["min_diff"]:
+                num_bars_sessions = (
+                    int(
+                        (self.clock.utc_now() - data_open.start_date).value
+                        / pd.Timedelta(minutes=1).value
+                    )
+                    - 1
+                )
+                bars_since_rebased = min(num_bars_sessions, 150)
+                if diff_perp > MARKETS[market_open]["min_diff"]:
                     if (
-                        opening_data.last_high_length < opening_data.last_low_length
-                        and swing1h.direction == -1
-                        and swing1h.low_price > mid_session
+                        data_rebased.rebased_top_length < data_rebased.rebased_low_length
+                        and data_rebased.rebased_top_length < bars_since_rebased
+                        and (
+                            (
+                                swing1h.direction == -1
+                                and swing1h.changed
+                                and swing1h.since_high == data_rebased.rebased_top_length
+                            )
+                            or (
+                                swing30m.direction == -1
+                                and swing30m.changed
+                                and swing30m.since_high == data_rebased.rebased_top_length
+                            )
+                        )
                     ):
                         ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
                         self._notify_signal(
-                            f"CHoC confirmed on 1m: ⬇️ (#{swing1h.duration} bars) | {market} | OB: [{ratios_str}]",
+                            f"CHoCH confirmed on 1m: ⬇️ (#{swing1h.since_low} bars) | Market rebased: {market_rebased} | OB: [{ratios_str}]",
                             bar.bar_type.instrument_id,
                             ratios=ratios,
                         )
                     elif (
-                        opening_data.last_low_length < opening_data.last_high_length
-                        and swing1h.direction == 1
-                        and swing1h.high_price < mid_session
+                        data_rebased.rebased_low_length < data_rebased.rebased_top_length
+                        and data_rebased.rebased_low_length < bars_since_rebased
+                        and (
+                            (
+                                swing1h.direction == 1
+                                and swing1h.changed
+                                and swing1h.since_low == data_rebased.rebased_low_length
+                            )
+                            or (
+                                swing30m.direction == 1
+                                and swing30m.changed
+                                and swing30m.since_low == data_rebased.rebased_low_length
+                            )
+                        )
                     ):
                         ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
                         self._notify_signal(
-                            f"CHoC confirmed on 1m: ⬆️ (#{swing1h.duration} bars) | {market} | OB: [{ratios_str}]",
+                            f"CHoCH confirmed on 1m: ⬆️ (#{swing1h.since_high} bars) | Market rebased {market_rebased} | OB: [{ratios_str}]",
                             bar.bar_type.instrument_id,
                             ratios=ratios,
                         )
@@ -529,12 +562,8 @@ class OrderBookLiquidityDetector(Actor):
                     opening_data.last_low_length >= 0 and opening_data.last_low_length < 60
                 )
             else:
-                recently_top = (
-                    opening_data.rebased_top_length >= 0 and opening_data.rebased_top_length < 60
-                )
-                recently_bottom = (
-                    opening_data.rebased_low_length >= 0 and opening_data.rebased_low_length < 60
-                )
+                recently_top = opening_data.rebased_top and opening_data.rebased_top_length < 60
+                recently_bottom = opening_data.rebased_low and opening_data.rebased_low_length < 60
 
             if recently_bottom and (
                 (swing1h.direction == 1 and swing1h.duration < 15)
@@ -729,10 +758,10 @@ class OrderBookLiquidityDetector(Actor):
                 top_length = opening_data.rebased_top_length
                 low_length = opening_data.rebased_low_length
                 recently_rebased_top = (
-                    opening_data.rebased_top_length > 0 and opening_data.rebased_top_length < 5
+                    opening_data.rebased_top and top_length > 0 and top_length < 5
                 )
                 recently_rebased_low = (
-                    opening_data.rebased_low_length > 0 and opening_data.rebased_low_length < 5
+                    opening_data.rebased_low and low_length > 0 and low_length < 5
                 )
             # both, betther not trade
             if recently_rebased_top and recently_rebased_low:
@@ -894,3 +923,45 @@ class OrderBookLiquidityDetector(Actor):
         return [m for m in markets if m not in open_markets] + [
             m for m in markets if m in open_markets
         ]
+
+    def most_recently_market_closed_rebased(
+        self, instrument_id: InstrumentId
+    ) -> tuple[str | None, OpeningMarketData | None]:
+        """
+        Returns the list of markets that have most recently closed and rebased for the given instrument.
+        """
+        markets = self._opening_market_data.get(instrument_id, {})
+        most_recently_data = most_recently_market = None
+        min_distance = math.inf
+        for market in markets:
+            opening_data = markets[market]
+            if opening_data.active:
+                continue
+            if opening_data.rebased_top and opening_data.rebased_top_length < min_distance:
+                min_distance = opening_data.rebased_top_length
+                most_recently_data = opening_data
+                most_recently_market = market
+            elif opening_data.rebased_low and opening_data.rebased_low_length < min_distance:
+                min_distance = opening_data.rebased_low_length
+                most_recently_data = opening_data
+                most_recently_market = market
+        return most_recently_market, most_recently_data
+
+    def most_recently_market_open(
+        self, instrument_id: InstrumentId
+    ) -> tuple[str | None, OpeningMarketData | None]:
+        """
+        Returns the list of markets that have most recently opened for the given instrument.
+        """
+        markets = self._opening_market_data.get(instrument_id, {})
+        most_recently_data = most_recently_market = None
+        most_recent = unix_nanos_to_dt(0)
+        for market in markets:
+            opening_data = markets[market]
+            if not opening_data.active:
+                continue
+            if opening_data.start_date > most_recent:
+                most_recent = opening_data.start_date
+                most_recently_data = opening_data
+                most_recently_market = market
+        return most_recently_market, most_recently_data
