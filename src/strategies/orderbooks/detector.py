@@ -506,7 +506,7 @@ class OrderBookLiquidityDetector(Actor):
                 if diff_perp > MARKETS[market_open]["min_diff"]:
                     if (
                         data_rebased.rebased_top_length < data_rebased.rebased_low_length
-                        and data_rebased.rebased_top_length < bars_since_rebased
+                        and data_rebased.rebased_top_length <= bars_since_rebased
                         and (
                             (
                                 swing1h.direction == -1
@@ -528,18 +528,10 @@ class OrderBookLiquidityDetector(Actor):
                         )
                     elif (
                         data_rebased.rebased_low_length < data_rebased.rebased_top_length
-                        and data_rebased.rebased_low_length < bars_since_rebased
+                        and data_rebased.rebased_low_length <= bars_since_rebased
                         and (
-                            (
-                                swing1h.direction == 1
-                                and swing1h.changed
-                                and swing1h.since_low == data_rebased.rebased_low_length
-                            )
-                            or (
-                                swing30m.direction == 1
-                                and swing30m.changed
-                                and swing30m.since_low == data_rebased.rebased_low_length
-                            )
+                            (swing1h.direction == 1 and swing1h.changed)
+                            or (swing30m.direction == 1 and swing30m.changed)
                         )
                     ):
                         ratios_str = ", ".join([f"{r:.2%}" for r in ratios])

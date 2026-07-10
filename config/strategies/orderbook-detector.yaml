@@ -33,5 +33,5 @@ actors:
         - SPCXUSDT-PERP.BINANCE_FUTURES
       # order book
       subscribe_book_at_interval: true
-      subscribe_trades: true
+      subscribe_trades: false
       log_data: false
