@@ -1,19 +1,28 @@
-strategies: []
-  # - strategy_path: src.strategies.choch.strategy:ChangeOfCharacterStrategy
-  #   config_path: src.strategies.choch.strategy:ChangeOfCharacterStrategyConfig
-  #   config: {}
-actors:
-  - actor_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetector
-    config_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetectorConfig
+strategies:
+  - strategy_path: src.strategies.choch.strategy:ChangeOfCharacterStrategy
+    config_path: src.strategies.choch.strategy:ChangeOfCharacterStrategyConfig
     config:
-      log_data: True
-      instrument_ids:
-        # crypto
-        - BTCUSDT-PERP.BINANCE_FUTURES
+      log_commands: True
+      log_events: False
+actors:
+  # - actor_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetector
+  #   config_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetectorConfig
+  #   config:
+  #     log_data: True
+  #     instrument_ids:
+  #       # crypto
+  #       - XAGUSDT-PERP.BINANCE_FUTURES
   - actor_path: src.strategies.choch.actors.swing_detector:SwingDetector
     config_path: src.strategies.choch.actors.swing_detector:SwingDetectorConfig
     config:
       log_data: True
       instrument_ids:
         # crypto
-        - BTCUSDT-PERP.BINANCE_FUTURES
+        # - BTCUSDT-PERP.BINANCE_FUTURES
+        # - DOGEUSDT-PERP.BINANCE_FUTURES
+        - XAGUSDT-PERP.BINANCE_FUTURES
+        # - LTCUSDT-PERP.BINANCE_FUTURES
+        # - SOLUSDT-PERP.BINANCE_FUTURES
+        # - SUIUSDT-PERP.BINANCE_FUTURES
+        # - TRXUSDT-PERP.BINANCE_FUTURES
+        # - XRPUSDT-PERP.BINANCE_FUTURES

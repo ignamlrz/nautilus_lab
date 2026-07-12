@@ -183,7 +183,7 @@ class ChangeOfCharacterDetectorConfig(ActorConfig, frozen=True):
     client_id: ClientId | None = None
     log_data: bool = True
     use_wicks: bool = False
-    bos_period: PositiveInt = 3
+    bos_period: PositiveInt = 2
     max_box_duration: PositiveInt = 100
 
 
@@ -246,7 +246,7 @@ class ChangeOfCharacterDetector(Actor):
         if bos.bos_duration < self.config.max_box_duration:
             return
         # restore bos to the last known high and low prices
-        start = self.config.max_box_duration
+        start = (self.config.max_box_duration // 2) + data.duration
 
         self._temp_choch_bos.pop(instrument_id, None)
         self._bos[instrument_id] = BreakOfStructureData.empty(
@@ -296,29 +296,36 @@ class ChangeOfCharacterDetector(Actor):
                         instrument_id=instrument_id,
                         bar_type=bar_type,
                         order_side=temp_choch_bos.order_side,
-                        global_peak_price=bos.high_price
+                        globex=bos.high_price
                         if temp_choch_bos.order_side == OrderSide.SELL
                         else bos.low_price,
                         # bos info
-                        bos_price=temp_choch_bos.bos,
-                        bos_duration=temp_choch_bos.bos_duration,
+                        bos_price=temp_choch_bos.bos
+                        if mss and mss.mss != temp_choch_bos.bos
+                        else None,
+                        bos_duration=temp_choch_bos.bos_duration
+                        if mss and mss.mss != temp_choch_bos.bos
+                        else None,
                         # choch info
                         choc_price=bos.choc,
                         choc_duration=bos.choc_duration,
                         # mss info
-                        mss_price=mss.mss if mss and mss.mss != temp_choch_bos.bos else None,
+                        mss_price=mss.mss
+                        if mss and mss.mss != temp_choch_bos.bos
+                        else temp_choch_bos.bos,
                         mss_duration=mss.mss_duration
                         if mss and mss.mss != temp_choch_bos.bos
-                        else None,
+                        else temp_choch_bos.bos_duration,
                         # ts event
                         ts_init=self.cache.bar(
                             bar_type=bar_type, index=temp_choch_bos.bos_duration
                         ).ts_event,
                         ts_event=self.clock.timestamp_ns(),
                         label="Change of Character Confirmation",
+                        is_historical=self._is_historical,
                     )
+                    self.publish_data(DataType(ChangeOfCharacterConfirmationData), data)
                     if not self._is_historical:
-                        self.publish_data(DataType(ChangeOfCharacterConfirmationData), data)
                         self.log.info(data.__repr__(), color=LogColor.CYAN)
 
     def on_historical_data(self, data):

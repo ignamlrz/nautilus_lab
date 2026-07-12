@@ -60,12 +60,6 @@ class InstrumentState:
     price_stop_loss: Price
     price_take_profit: Price
 
-    @property
-    def diff(self) -> Decimal:
-        return (
-            self.signal_high_price.as_decimal() - self.signal_low_price.as_decimal()
-        ) / self.price_negotiation
-
     def update_from_state(self, state: InstrumentState):
         if self.order_side != state.order_side:
             raise ValueError(
@@ -123,9 +117,9 @@ class ChangeOfCharacterStrategy(Strategy):
 
         # subscribe to swing data and change of character confirmation data
         self.subscribe_data(DataType(SwingData), client_id=self.config.client_id)
-        self.subscribe_data(
-            DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
-        )
+        # self.subscribe_data(
+        #     DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
+        # )
         # self.subscribe_data(DataType(OpenMarketData), client_id=self.config.client_id)
 
     def on_stop(self):
@@ -139,19 +133,17 @@ class ChangeOfCharacterStrategy(Strategy):
 
         # unsubscribe to swing data and change of character confirmation data
         self.unsubscribe_data(DataType(SwingData), client_id=self.config.client_id)
-        self.unsubscribe_data(
-            DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
-        )
+        # self.unsubscribe_data(
+        #     DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
+        # )
         # self.unsubscribe_data(DataType(OpenMarketData), client_id=self.config.client_id)
 
     def on_bar(self, bar: Bar):
         instrument_id = bar.bar_type.instrument_id
-        if instrument_id not in self._swing_signal:
-            self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
+        if instrument_id not in self._swing_signal and instrument_id not in self._choc_confirmation:
             return
         # check for possible entry
-        state = self._instrument_state[instrument_id]
-        swing_data = self._swing_signal[instrument_id]
+        data = self._swing_signal[instrument_id]
         instrument = self.cache.instrument(instrument_id)
         if not instrument:
             self.log.warning(f"Instrument not found: {instrument_id}")
@@ -162,143 +154,89 @@ class ChangeOfCharacterStrategy(Strategy):
         if not balance_free or balance_free.as_decimal() <= 0:
             self.log.warning(f"It has not free balance on venue: {instrument.id.venue}")
             return
-
-        if swing_data.order_side == OrderSide.BUY:
-            if bar.low < state.price_stop_loss:
-                if bar.close > state.price_market:
-                    diff = state.price_take_profit - state.price_limit
-                    state.price_take_profit = state.price_limit + diff * 2
-                    self.buy(
-                        instrument,
-                        balance_free,
-                        label=swing_data.label,
-                        entry_order_type=OrderType.MARKET,
+        exposure = self.portfolio.net_exposure(instrument.id)
+        if exposure.as_decimal() != 0:
+            for p in self.cache.positions_open(instrument_id=instrument.id):
+                if p.side == PositionSide.LONG:
+                    self.close_position(p)
+                    self._notify_telegram(
+                        f"Closing LONG position on instrument {instrument.id} due to SELL signal on order book ratio",
+                        instrument.id,
+                        text="",
                     )
-                    self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-                elif bar.close > state.price_market:
-                    pass
-                else:
-                    self._cancel_signal_for_instrument(instrument_id)
-            elif bar.close < state.price_limit and bar.close >= state.price_market:
-                self.buy(
-                    instrument,
-                    balance_free,
-                    label=swing_data.label,
-                    entry_order_type=OrderType.MARKET,
-                )
-                self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-            elif bar.close < state.price_negotiation:
-                self.buy(instrument, balance_free, label=swing_data.label)
-                self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-        elif swing_data.order_side == OrderSide.SELL:
-            if bar.high > state.price_stop_loss:
-                if bar.close < state.price_limit:
-                    diff = state.price_take_profit - state.price_limit
-                    state.price_take_profit = state.price_limit + diff * 2
-                    self.sell(
-                        instrument,
-                        balance_free,
-                        label=swing_data.label,
-                        entry_order_type=OrderType.MARKET,
+                elif p.side == PositionSide.SHORT:
+                    self.close_position(p)
+                    self._notify_telegram(
+                        f"Closing SHORT position on instrument {instrument.id} due to BUY signal on order book ratio",
+                        instrument.id,
+                        text="",
                     )
-                    self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-                elif bar.close < state.price_market:
-                    pass
-                else:
-                    self._cancel_signal_for_instrument(instrument_id)
-            elif bar.close > state.price_limit and bar.close <= state.price_market:
-                self.sell(
-                    instrument,
-                    balance_free,
-                    label=swing_data.label,
-                    entry_order_type=OrderType.MARKET,
-                )
-                self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-            elif bar.close > state.price_negotiation:
-                self.sell(instrument, balance_free, label=swing_data.label)
-                self.unsubscribe_bars(bar.bar_type, client_id=self.config.client_id)
-        # elif instrument_id in self._choc_confirmation:
-        #     choc_confirmation = self._choc_confirmation[instrument_id]
-        #     # buy on limit
-        #     if bar.close > state.price_negotiation:
-        #         if swing_data.order_side == OrderSide.BUY:
-        #             self.buy(instrument, balance_free, label=swing_data.label)
-        #         elif swing_data.order_side == OrderSide.SELL:
-        #             self.sell(instrument, balance_free, label=swing_data.label)
+                    self.buy(instrument, balance_free, label=data.label)
+                    self.sell(instrument, balance_free, label=data.label)
+            self.log.warning(
+                f"It has exposure on instrument: {instrument.id} with exposure: {exposure}"
+            )
+            return
+        self.log.info(
+            f"{instrument.id} -> Trying create {data.order_side.name} order with free balance: {balance_free}"
+        )
 
     def on_data(self, data):
         if isinstance(data, SwingData):
             self.on_swing_data(data)
-        elif isinstance(data, ChangeOfCharacterConfirmationData):
-            self.on_change_of_character_confirmation_data(data)
 
     def on_swing_data(self, data: SwingData):
         if data.order_side == OrderSide.NO_ORDER_SIDE:
             self._notify_telegram("ℹ️ INFO", data.instrument_id, data.label)
             return
 
-        # build swing signal
-        # self._swing_signal[data.instrument_id] = data
-        # self._build_instrument_state(data)
-
-        # # subscribe bars
-        # self.subscribe_bars(bar_type=data.bar_type, client_id=self.config.client_id)
+        self._swing_signal[data.instrument_id] = data
 
         self._notify_telegram(data.label, data.instrument_id, text="")
-        # def cancel_swing_signal(event: TimeEvent):
-        #     if data.instrument_id in self._swing_signal:
-        #         self._swing_signal.pop(data.instrument_id)
-        #         self._notify_telegram(
-        #             "⚠️ WARNING",
-        #             data.instrument_id,
-        #             text=f"Signal expired after 2 hours.",
-        #         )
-        #         self.unsubscribe_bars(bar_type=data.bar_type, client_id=self.config.client_id)
-        # self.clock.set_time_alert(
-        #     name=f"OrderbookStrategy:{data.instrument_id}",
-        #     alert_time=self.clock.utc_now() + pd.Timedelta(hours=2),
-        #     callback=cancel_swing_signal,
-        #     override=True,
-        # )
+
+        self._operate_on_swing(data)
+
+        def callback(event: TimeEvent):
+            if data.instrument_id in self._swing_signal:
+                self._swing_signal.pop(data.instrument_id)
+                self._notify_telegram(
+                    "⚠️ WARNING",
+                    data.instrument_id,
+                    text="Signal expired after 4 hours.",
+                )
+                self.unsubscribe_bars(bar_type=data.bar_type, client_id=self.config.client_id)
+
+        self.clock.set_time_alert(
+            name=f"OrderbookStrategy:{data.instrument_id}",
+            alert_time=self.clock.utc_now() + pd.Timedelta(hours=4),
+            callback=callback,
+            override=True,
+        )
 
     def on_change_of_character_confirmation_data(self, data: ChangeOfCharacterConfirmationData):
-        # if data.bos_price is None:
-        #     return
-        if data.instrument_id not in self._swing_signal:
-            return
-        swing_data = self._swing_signal.get(data.instrument_id)
-        if swing_data.order_side != data.order_side:
-            return
         self._choc_confirmation[data.instrument_id] = data
+        self._on_change_of_character_data(data)
 
     def on_open_market_data(self, data: OpenMarketData):
         pass
 
-    def buy(
-        self,
-        instrument: Instrument,
-        balance_free: Money,
-        label: str,
-        entry_order_type: OrderType = OrderType.LIMIT,
-    ):
+    def buy(self, instrument: Instrument, balance_free: Money, label: str):
         state = self._instrument_state[instrument.id]
         entry_price = instrument.make_price(state.price_limit)
         sl_price = instrument.make_price(state.price_stop_loss)
         tp_price = instrument.make_price(state.price_take_profit)
-        quantity = instrument.make_qty((balance_free * 0.05) / entry_price)
+        quantity = instrument.make_qty((balance_free * 0.5) / entry_price)
         order_list = self.order_factory.bracket(
             instrument_id=instrument.id,
             order_side=OrderSide.BUY,
             quantity=quantity,
             # Entry order
-            entry_order_type=entry_order_type,
-            entry_price=entry_price if entry_order_type == OrderType.LIMIT else None,
+            entry_order_type=OrderType.LIMIT,
+            entry_price=entry_price,
             # Take-profit order
             tp_price=tp_price,
-            tp_order_type=OrderType.LIMIT,
             # Stop-loss order
             sl_trigger_price=sl_price,
-            sl_order_type=OrderType.STOP_MARKET,
         )
         self.submit_order_list(
             order_list, position_id=PositionId(f"{instrument.id}:SWING:{UUID4()}")
@@ -310,13 +248,7 @@ class ChangeOfCharacterStrategy(Strategy):
         self._swing_signal.pop(instrument.id, None)
         return order_list
 
-    def sell(
-        self,
-        instrument: Instrument,
-        balance_free: Money,
-        label: str,
-        entry_order_type: OrderType = OrderType.LIMIT,
-    ):
+    def sell(self, instrument: Instrument, balance_free: Money, label: str):
         state = self._instrument_state[instrument.id]
         entry_price = instrument.make_price(state.price_limit)
         sl_price = instrument.make_price(state.price_stop_loss)
@@ -327,14 +259,12 @@ class ChangeOfCharacterStrategy(Strategy):
             order_side=OrderSide.SELL,
             quantity=quantity,
             # Entry order
-            entry_order_type=entry_order_type,
-            entry_price=entry_price if entry_order_type == OrderType.LIMIT else None,
+            entry_order_type=OrderType.LIMIT,
+            entry_price=entry_price,
             # Take-profit order
             tp_price=tp_price,
-            tp_order_type=OrderType.LIMIT,
             # Stop-loss order
             sl_trigger_price=sl_price,
-            sl_order_type=OrderType.STOP_MARKET,
         )
         # write on bullets entry price @ quantity, sl price, tp price
         self.submit_order_list(
@@ -347,30 +277,20 @@ class ChangeOfCharacterStrategy(Strategy):
         self._swing_signal.pop(instrument.id, None)
         return order_list
 
-    def _build_instrument_state(self, data: SwingData) -> None:
+    def _operate_on_swing(self, data: SwingData) -> None:
         self._choc_confirmation[data.instrument_id] = data
         instrument_id = data.instrument_id
         instrument = self.cache.instrument(instrument_id)
         date_start = self.clock.utc_now()
         date_expiration = date_start + self.config.signal_expiration
-        diff = data.high_price - data.low_price
-        diff_perp = diff / data.low_price
+        high_price = instrument.make_price(data.high_price)
+        low_price = instrument.make_price(data.low_price)
         if data.order_side == OrderSide.BUY:
-            low_price = instrument.make_price(data.low_price)
-            high_price = instrument.make_price(
-                low_price + diff * 0.328
-            )  # if diff_perp > 0.01 else instrument.make_price(data.high_price)
             price_start = low_price
             price_end = high_price
-            real_end = instrument.make_price(data.high_price)
         elif data.order_side == OrderSide.SELL:
-            high_price = instrument.make_price(data.high_price)
-            low_price = instrument.make_price(
-                high_price - diff * 0.328
-            )  # if diff_perp > 0.01 else instrument.make_price(data.low_price)
             price_start = high_price
             price_end = low_price
-            real_end = instrument.make_price(data.low_price)
         else:
             self.log.warning(
                 f"Received ChangeOfCharacterData with no order side for instrument: {instrument_id}. Ignoring."
@@ -390,7 +310,7 @@ class ChangeOfCharacterStrategy(Strategy):
             instrument, price_start, price_end, self.config.fib_stop_loss
         )
         price_take_profit = self._calc_retracement_fibonacci_price(
-            instrument, price_start, real_end, self.config.fib_take_profit
+            instrument, price_start, price_end, self.config.fib_take_profit
         )
         state = InstrumentState(
             market="",
@@ -400,8 +320,8 @@ class ChangeOfCharacterStrategy(Strategy):
             date_start=date_start,
             date_expiration=date_expiration,
             # signal state
-            signal_low_price=instrument.make_price(data.low_price),
-            signal_high_price=instrument.make_price(data.high_price),
+            signal_low_price=low_price,
+            signal_high_price=high_price,
             # price state
             price_negotiation=price_negotiation,
             price_limit=price_limit,
@@ -411,53 +331,64 @@ class ChangeOfCharacterStrategy(Strategy):
         )
         self._instrument_state[instrument_id] = state
 
-        # balance_free = self.portfolio.account(instrument.id.venue).balance_free(
-        #     currency=instrument.quote_currency
-        # )
-        # if not balance_free or balance_free.as_decimal() <= 0:
-        #     self.log.warning(f"It has not free balance on venue: {instrument.id.venue}")
-        #     return
-        # exposure = self.portfolio.net_exposure(instrument.id)
-        # if exposure.as_decimal() != 0:
-        #     self.log.warning(
-        #         f"It has exposure on instrument: {instrument.id} with exposure: {exposure}"
-        #     )
-        #     if data.order_side == OrderSide.SELL:
-        #         self.close_all_positions(instrument_id=instrument.id, client_id=self.config.client_id, position_side=PositionSide.LONG)
-        #         self._notify_telegram(
-        #             f"Closing LONG position on instrument {instrument.id} due to SELL signal on swing",
-        #             instrument.id,
-        #             text=f"",
-        #         )
-        #     elif data.order_side == OrderSide.BUY:
-        #         self.close_all_positions(instrument_id=instrument.id, client_id=self.config.client_id, position_side=PositionSide.SHORT)
-        #         self._notify_telegram(
-        #             f"Closing SHORT position on instrument {instrument.id} due to BUY signal on swing",
-        #             instrument.id,
-        #             text=f"",
-        #         )
+        balance_free = self.portfolio.account(instrument.id.venue).balance_free(
+            currency=instrument.quote_currency
+        )
+        if not balance_free or balance_free.as_decimal() <= 0:
+            self.log.warning(f"It has not free balance on venue: {instrument.id.venue}")
+            return
+        exposure = self.portfolio.net_exposure(instrument.id)
+        if exposure.as_decimal() != 0:
+            self.log.warning(
+                f"It has exposure on instrument: {instrument.id} with exposure: {exposure}"
+            )
+            if data.order_side == OrderSide.SELL:
+                self.close_all_positions(
+                    instrument_id=instrument.id,
+                    client_id=self.config.client_id,
+                    position_side=PositionSide.LONG,
+                )
+                self._notify_telegram(
+                    f"Closing LONG position on instrument {instrument.id} due to SELL signal on swing",
+                    instrument.id,
+                    text="",
+                )
+            elif data.order_side == OrderSide.BUY:
+                self.close_all_positions(
+                    instrument_id=instrument.id,
+                    client_id=self.config.client_id,
+                    position_side=PositionSide.SHORT,
+                )
+                self._notify_telegram(
+                    f"Closing SHORT position on instrument {instrument.id} due to BUY signal on swing",
+                    instrument.id,
+                    text="",
+                )
 
-        #     self.cancel_all_orders(instrument_id=instrument.id, client_id=self.config.client_id, order_side=data.order_side)
-        #     self._notify_telegram(
-        #         f"Cancelling {data.order_side.name} order on instrument {instrument.id} due to new swing signal",
-        #         instrument.id,
-        #         text=f"",
-        #     )
-        # self.log.info(
-        #     f"{instrument.id} -> Trying create {data.order_side.name} order with free balance: {balance_free}"
-        # )
-        # if data.order_side == OrderSide.BUY:
-        #     self.buy(instrument, balance_free, label=data.label)
-        # elif data.order_side == OrderSide.SELL:
-        #     self.sell(instrument, balance_free, label=data.label)
+            self.cancel_all_orders(
+                instrument_id=instrument.id,
+                client_id=self.config.client_id,
+                order_side=data.order_side,
+            )
+            self._notify_telegram(
+                f"Cancelling {data.order_side.name} order on instrument {instrument.id} due to new swing signal",
+                instrument.id,
+                text="",
+            )
+        self.log.info(
+            f"{instrument.id} -> Trying create {data.order_side.name} order with free balance: {balance_free}"
+        )
+        if data.order_side == OrderSide.BUY:
+            self.buy(instrument, balance_free, label=data.label)
+        elif data.order_side == OrderSide.SELL:
+            self.sell(instrument, balance_free, label=data.label)
 
     def on_position_closed(self, event: PositionClosed):
         self._notify_telegram(
             f"Position closed ({event.position_id}) on instrument {event.instrument_id} with side {event.side.name} and quantity {event.quantity}",
             event.instrument_id,
-            text=f"● PnL: {event.realized_pnl}\n● Open: {event.avg_px_open} @ {event.peak_qty}\n● Exit: {event.avg_px_close}",
+            text=f"● PnL: {event.realized_pnl}\n● Avg Open: {event.avg_px_open}\n● Avg Close: {event.avg_px_close}",
         )
-        event.id
 
     def _on_change_of_character_data(self, data: ChangeOfCharacterConfirmationData) -> None:
         instrument_id = data.instrument_id
@@ -609,4 +540,3 @@ class ChangeOfCharacterStrategy(Strategy):
                     f"Signal expired for instrument: {instrument_id} with no open orders."
                 )
             self.unsubscribe_bars(state.bar_type, client_id=self.config.client_id)
-            self.clock.cancel_timer(name=f"OrderbookStrategy:{instrument_id}")

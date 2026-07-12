@@ -12,6 +12,7 @@ class SwingData(Data):
     order_side: str
     high_price: float
     low_price: float
+    tested_price: float
     duration: int
 
 
@@ -29,16 +30,17 @@ class ChangeOfCharacterConfirmationData(Data):
     instrument_id: InstrumentId
     bar_type: str
     order_side: str
-    global_peak_price: float
+    globex: float
     # bos info
-    bos_price: int
+    bos_price: float
     bos_duration: int
     # choch info
-    choc_price: int
+    choc_price: float
     choc_duration: int
     # mss info
-    mss_price: int
+    mss_price: float
     mss_duration: int
+    is_historical: bool
 
     def __repr__(self):
         if isinstance(self.order_side, str):
@@ -49,7 +51,7 @@ class ChangeOfCharacterConfirmationData(Data):
             f"ChangeOfCharacterConfirmationData("
             f"Bar Type={self.bar_type}, "
             f"Side={order_side.name}, "
-            f"Global {'Min' if order_side == OrderSide.BUY else 'Max'}={self.global_peak_price}, "
+            f"Global {'Min' if order_side == OrderSide.BUY else 'Max'}={self.globex}, "
             f"BoS={self.bos_price}, "
             f"CHoC={self.choc_price}, "
             f"MSS={self.mss_price})"

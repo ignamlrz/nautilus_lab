@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from typing import Any
 
@@ -31,6 +32,7 @@ class MarketInfo:
     hours: MarketHours
     min_diff: float
     operable: bool
+    max_diff: float = 1.0
 
 
 @dataclass
@@ -45,6 +47,8 @@ class MarketData:
     session_low_duration: int = 0
     session_bar: int = 0
     active: bool = False
+    markets_breaked_above: list[Market] = field(default_factory=list)
+    markets_breaked_below: list[Market] = field(default_factory=list)
     # after market close
     break_above: bool = False
     break_above_duration: int = math.inf
@@ -114,28 +118,33 @@ class MarketData:
 MARKETS = {
     Market.SSE_SZSE: MarketInfo(
         hours=MarketHours.continuous("Asia/Hong_Kong", 8, 0, 15, 0, name="SSE/SZSE"),
-        min_diff=0.004,
+        min_diff=0.002,
         operable=True,
+        max_diff=0.1,
     ),
     Market.LSE: MarketInfo(
         hours=MarketHours.continuous("Europe/London", 8, 0, 15, 0, name="LSE"),
-        min_diff=0.004,
+        min_diff=0.002,
         operable=True,
+        max_diff=0.1,
     ),
     Market.PRE_NYSE: MarketInfo(
         hours=MarketHours.continuous("America/New_York", 8, 0, 9, 30, name="PRE_NYSE"),
         min_diff=0.002,
         operable=False,
+        max_diff=0.1,
     ),
     Market.NYSE: MarketInfo(
         hours=MarketHours.continuous("America/New_York", 9, 30, 16, 0, name="NYSE"),
-        min_diff=0.006,
+        min_diff=0.002,
         operable=True,
+        max_diff=0.1,
     ),
     Market.POST_NYSE: MarketInfo(
         hours=MarketHours.continuous("America/New_York", 16, 0, 20, 0, name="POST_NYSE"),
-        min_diff=0.004,
+        min_diff=0.002,
         operable=True,
+        max_diff=0.1,
     ),
 }
 
@@ -149,9 +158,8 @@ class SwingDetectorConfig(ActorConfig, frozen=True):
     bar_type_spec: str = "1-MINUTE-LAST-EXTERNAL"
     client_id: ClientId | None = None
     log_data: bool = True
-    use_wicks: bool = False
-    fast_period: PositiveInt = 30
-    slow_period: PositiveInt = 60
+    use_wicks: bool = True
+    period: PositiveInt = 60
 
 
 class SwingDetector(Actor):
@@ -207,6 +215,8 @@ class SwingDetector(Actor):
             min_diff=MARKETS[self._current_market].min_diff,
             operable=MARKETS[self._current_market].operable,
             label=f"Market {self._current_market.name} is now open. Operable: {MARKETS[self._current_market].operable}",
+            ts_init=self.clock.timestamp_ns(),
+            ts_event=self.clock.timestamp_ns(),
         )
         self.publish_data(DataType(OpenMarketData), open_market_data)
 
@@ -229,8 +239,8 @@ class SwingDetector(Actor):
 
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
-            self._swings[instrument_id] = swings_fast = Swings(period=self.config.fast_period)
-            self.register_indicator_for_bars(bar_type, swings_fast)
+            self._swings[instrument_id] = swings = Swings(period=self.config.period)
+            self.register_indicator_for_bars(bar_type, swings)
 
             uuid = UUID4()
             self._subscribe_bars_uuid_map[uuid] = bar_type
@@ -281,52 +291,59 @@ class SwingDetector(Actor):
             )
             diff = market_data.session_high_price - market_data.session_low_price
             diff_perp = diff / bar.close
-            if diff_perp < MARKETS[market].min_diff:
+            if diff_perp < MARKETS[market].min_diff or diff_perp > MARKETS[market].max_diff:
                 return
-            if (
-                rebased_above_this_market or market_data.session_high_duration < swing.period
-            ) and swing.direction == -1:
+
+            # rebased above this market
+            if market_data.session_high_duration < 30 and swing.direction == -1:
                 if rebased_above_this_market:
-                    text = f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | Market rebased {market_rebased.name} on market {market.name} | Diff: [{diff_perp:.2%}]"
-                    if self.config.log_data:
-                        self.log.info(text, LogColor.RED)
+                    market_rebased_data.break_above_triggered = True
+                    text = f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | {market.name} breaks above {market_rebased.name} | Diff: [{diff_perp:.2%}]"
+                elif market_data.markets_breaked_above:
+                    text = f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | New high on {market.name} | Diff: [{diff_perp:.2%}]"
                 else:
-                    text = f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | New high on market {market.name} | Diff: [{diff_perp:.2%}]"
-                    if self.config.log_data:
-                        self.log.info(text, LogColor.RED)
-                market_rebased_data.break_above_triggered = True
-                swing_data = SwingData(
-                    instrument_id=bar.bar_type.instrument_id,
-                    bar_type=bar.bar_type,
-                    order_side=OrderSide.SELL,
-                    high_price=swing.high_price,
-                    low_price=swing.low_price,
-                    duration=swing.duration,
-                    label=text,
-                )
-                self.publish_data(DataType(SwingData), swing_data)
-            elif (
-                rebased_below_this_market or market_data.session_low_duration < swing.period
-            ) and swing.direction == 1:
+                    return
+                for md in market_data.markets_breaked_above:
+                    if md.session_high_price > swing.low_price:
+                        if self.config.log_data:
+                            self.log.info(text, LogColor.RED)
+                        swing_data = SwingData(
+                            instrument_id=bar.bar_type.instrument_id,
+                            bar_type=bar.bar_type,
+                            order_side=OrderSide.SELL,
+                            high_price=swing.high_price,
+                            low_price=swing.low_price,
+                            tested_price=md.session_high_price,
+                            duration=swing.duration,
+                            label=f"{text} | Broken Price: {md.session_high_price}",
+                        )
+                        self.publish_data(DataType(SwingData), swing_data)
+                        break
+            # rebased below this market
+            if market_data.session_low_duration < 30 and swing.direction == 1:
                 if rebased_below_this_market:
-                    text = f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | Market rebased {market_rebased.name} on market {market.name} | Diff: [{diff_perp:.2%}]"
-                    if self.config.log_data:
-                        self.log.info(text, LogColor.GREEN)
+                    market_rebased_data.break_below_triggered = True
+                    text = f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | {market.name} breaks below {market_rebased.name} | Diff: [{diff_perp:.2%}]"
+                elif market_data.markets_breaked_below:
+                    text = f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | New low on {market.name} | Diff: [{diff_perp:.2%}]"
                 else:
-                    text = f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | New low on market {market.name} | Diff: [{diff_perp:.2%}]"
-                    if self.config.log_data:
-                        self.log.info(text, LogColor.GREEN)
-                market_rebased_data.break_below_triggered = True
-                swing_data = SwingData(
-                    instrument_id=bar.bar_type.instrument_id,
-                    bar_type=bar.bar_type,
-                    order_side=OrderSide.BUY,
-                    high_price=swing.high_price,
-                    low_price=swing.low_price,
-                    duration=swing.duration,
-                    label=text,
-                )
-                self.publish_data(DataType(SwingData), swing_data)
+                    return
+                for md in market_data.markets_breaked_below:
+                    if md.session_low_price < swing.high_price:
+                        if self.config.log_data:
+                            self.log.info(text, LogColor.GREEN)
+                        swing_data = SwingData(
+                            instrument_id=bar.bar_type.instrument_id,
+                            bar_type=bar.bar_type,
+                            order_side=OrderSide.BUY,
+                            high_price=swing.high_price,
+                            low_price=swing.low_price,
+                            tested_price=md.session_low_price,
+                            duration=swing.duration,
+                            label=f"{text} | Broken Price: {md.session_low_price}",
+                        )
+                        self.publish_data(DataType(SwingData), swing_data)
+                        break
 
     def on_historical_data(self, data: Any) -> None:
         """
@@ -367,10 +384,23 @@ class SwingDetector(Actor):
             )
             self._open_market_data[bar.bar_type.instrument_id] = (current_market, market_data)
         else:
-            self._open_market_data[bar.bar_type.instrument_id][1].handle_bar_from_active_market(bar)
+            market_data = self._open_market_data[bar.bar_type.instrument_id][1]
+            market_data.handle_bar_from_active_market(bar)
 
         for data in self._closed_market_data.get(bar.bar_type.instrument_id, {}).values():
             data.handle_bar_from_closed_market(bar, current_market)
+            if data.break_above_duration == 0:
+                market_data.markets_breaked_above.append(data)
+                self.log.info(
+                    f"Market {current_market.name} rebased top on market {data.market_info.hours.name}",
+                    LogColor.CYAN,
+                )
+            if data.break_below_duration == 0:
+                self.log.info(
+                    f"Market {current_market.name} rebased bottom on market {data.market_info.hours.name}",
+                    LogColor.CYAN,
+                )
+                market_data.markets_breaked_below.append(data)
 
     def most_recent_rebased_market(
         self, instrument_id: InstrumentId
