@@ -9,16 +9,21 @@ from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.common.config import PositiveInt
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.common.events import TimeEvent
+from nautilus_trader.core import UUID4
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.indicators import Swings
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import DataType
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 
 from src.helpers.market_hours import MarketHours
 from src.helpers.market_hours import upcoming
 from src.strategies.choch.enums import Market
+from src.strategies.choch.events import OpenMarketData
+from src.strategies.choch.events import SwingData
 
 
 @dataclass
@@ -38,12 +43,18 @@ class MarketData:
     session_low_price: float
     session_high_duration: int = 0
     session_low_duration: int = 0
+    session_bar: int = 0
     active: bool = False
     # after market close
     break_above: bool = False
-    break_below: bool = False
     break_above_duration: int = math.inf
+    break_above_market: Market | None = None
+    break_above_triggered: bool = False
+
+    break_below: bool = False
     break_below_duration: int = math.inf
+    break_below_market: Market | None = None
+    break_below_triggered: bool = False
 
     @classmethod
     def create(cls, market_info: MarketInfo, bar: Bar, use_wicks: bool = False) -> MarketData:
@@ -57,33 +68,38 @@ class MarketData:
             active=True,
         )
 
-    def handle_bar(self, bar: Bar) -> None:
+    def handle_bar_from_active_market(self, bar: Bar) -> None:
+        self.session_bar += 1
         high, low = self.__high_low_prices(bar)
-        if self.active:
-            if high > self.session_high_price:
-                self.session_high_price = high
-                self.session_high_duration = 0
-            else:
-                self.session_high_duration += 1
-            if low < self.session_low_price:
-                self.session_low_price = low
-                self.session_low_duration = 0
-            else:
-                self.session_low_duration += 1
+        if high > self.session_high_price:
+            self.session_high_price = high
+            self.session_high_duration = 0
+        else:
+            self.session_high_duration += 1
+        if low < self.session_low_price:
+            self.session_low_price = low
+            self.session_low_duration = 0
         else:
             self.session_low_duration += 1
-            self.session_high_duration += 1
-            if self.break_below:
-                self.break_below_duration += 1
-            elif low < self.session_low_price:
-                self.break_below = True
-                self.break_below_duration = 0
 
-            if self.break_above:
-                self.break_above_duration += 1
-            elif high >= self.session_high_price:
-                self.break_above = True
-                self.break_above_duration = 0
+    def handle_bar_from_closed_market(self, bar: Bar, market: Market) -> None:
+        self.session_bar += 1
+        high, low = self.__high_low_prices(bar)
+        self.session_low_duration += 1
+        self.session_high_duration += 1
+        if self.break_below:
+            self.break_below_duration += 1
+        elif low < self.session_low_price:
+            self.break_below = True
+            self.break_below_duration = 0
+            self.break_below_market = market
+
+        if self.break_above:
+            self.break_above_duration += 1
+        elif high >= self.session_high_price:
+            self.break_above = True
+            self.break_above_duration = 0
+            self.break_above_market = market
 
     def __high_low_prices(self, bar: Bar) -> tuple[float, float]:
         if self.use_wicks:
@@ -154,14 +170,15 @@ class SwingDetector(Actor):
     def __init__(self, config: SwingDetectorConfig) -> None:
         super().__init__(config)
 
-        self._swings_fast: dict[InstrumentId, Swings] = {}
-        self._swings_slow: dict[InstrumentId, Swings] = {}
+        self._swings: dict[InstrumentId, Swings] = {}
         self._closed_market_data: dict[InstrumentId, dict[Market, MarketData]] = {}
         self._open_market_data: dict[InstrumentId, tuple[Market, MarketData]] = {}
 
         # sort markets by their opening time
         self._sort_markets: list[str] = []
         self._current_market: Market
+
+        self._subscribe_bars_uuid_map: dict[UUID4, BarType] = {}
 
     def update_market_opening(self, date: datetime) -> None:
         upcoming_markets = upcoming([v.hours for v in MARKETS.values()], date)
@@ -185,6 +202,12 @@ class SwingDetector(Actor):
             alert_time=next_open_time,
             callback=self.on_market_opening_time_event,
         )
+        open_market_data = OpenMarketData(
+            market=self._current_market.name,
+            min_diff=MARKETS[self._current_market].min_diff,
+            operable=MARKETS[self._current_market].operable,
+        )
+        self.publish_data(DataType(OpenMarketData), open_market_data)
 
     def on_start(self) -> None:
         client_id = self.config.client_id
@@ -205,19 +228,23 @@ class SwingDetector(Actor):
 
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
-            self._swings_fast[instrument_id] = swings_fast = Swings(period=self.config.fast_period)
-            self._swings_slow[instrument_id] = swings_slow = Swings(period=self.config.slow_period)
+            self._swings[instrument_id] = swings_fast = Swings(period=self.config.fast_period)
             self.register_indicator_for_bars(bar_type, swings_fast)
-            self.register_indicator_for_bars(bar_type, swings_slow)
+
+            uuid = UUID4()
+            self._subscribe_bars_uuid_map[uuid] = bar_type
             self.request_bars(
                 bar_type=bar_type,
                 start=requests_start,
                 client_id=client_id,
-                callback=lambda _: self.subscribe_bars(
-                    bar_type=bar_type,
-                    client_id=client_id,
-                ),
+                callback=self.request_bars_finished,
+                request_id=uuid,
             )
+
+    def request_bars_finished(self, uuid: UUID4) -> None:
+        bar_type = self._subscribe_bars_uuid_map.pop(uuid, None)
+        if bar_type is not None:
+            self.subscribe_bars(bar_type=bar_type, client_id=self.config.client_id)
 
     def on_stop(self) -> None:
         client_id = self.config.client_id
@@ -230,64 +257,79 @@ class SwingDetector(Actor):
         if "1-MINUTE" not in str(bar.bar_type.spec):
             return
         self.update_market_data(bar)
-        swing30m = self._swings_fast[bar.bar_type.instrument_id]
-        swing1h = self._swings_slow[bar.bar_type.instrument_id]
+        swing = self._swings[bar.bar_type.instrument_id]
+        if swing.initialized and swing.changed:
+            market_rebased, market_rebased_data = self.most_recent_rebased_market(
+                bar.bar_type.instrument_id
+            )
+            market, market_data = self._open_market_data.get(
+                bar.bar_type.instrument_id, (None, None)
+            )
+            if not market or not market_rebased or not MARKETS[market].operable:
+                return
 
-        # if swing1h.changed or swing30m.changed:
-        #     market_rebased, data_rebased = self.most_recently_market_closed_rebased(
-        #         bar.bar_type.instrument_id
-        #     )
-        #     market_open, data_open = self.most_recently_market_open(bar.bar_type.instrument_id)
-        #     if market_rebased and data_rebased and market_open and data_open:
-        #         last_high_bar = self.cache.bar(bar.bar_type, data_open.session_high_duration)
-        #         last_low_bar = self.cache.bar(bar.bar_type, data_open.session_low_duration)
-        #         diff = last_high_bar.high - last_low_bar.low
-        #         diff_perp = diff / bar.close
-        #         num_bars_sessions = (
-        #             int(
-        #                 (self.clock.utc_now() - data_open.start_date).value
-        #                 / pd.Timedelta(minutes=1).value
-        #             )
-        #             - 1
-        #         )
-        #         bars_since_rebased = min(num_bars_sessions, 150)
-        #         if diff_perp > MARKETS[market_open]["min_diff"]:
-        #             if (
-        #                 data_rebased.break_above_duration < data_rebased.break_below_duration
-        #                 and data_rebased.break_above_duration <= bars_since_rebased
-        #                 and (
-        #                     (
-        #                         swing1h.direction == -1
-        #                         and swing1h.changed
-        #                         and swing1h.since_high == data_rebased.break_above_duration
-        #                     )
-        #                     or (
-        #                         swing30m.direction == -1
-        #                         and swing30m.changed
-        #                         and swing30m.since_high == data_rebased.break_above_duration
-        #                     )
-        #                 )
-        #             ):
-        #                 ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
-        #                 self._notify_signal(
-        #                     f"CHoCH confirmed on 1m: ⬇️ (#{swing1h.since_low} bars) | Market rebased: {market_rebased} | OB: [{ratios_str}]",
-        #                     bar.bar_type.instrument_id,
-        #                     ratios=ratios,
-        #                 )
-        #             elif (
-        #                 data_rebased.break_below_duration < data_rebased.break_above_duration
-        #                 and data_rebased.break_below_duration <= bars_since_rebased
-        #                 and (
-        #                     (swing1h.direction == 1 and swing1h.changed)
-        #                     or (swing30m.direction == 1 and swing30m.changed)
-        #                 )
-        #             ):
-        #                 ratios_str = ", ".join([f"{r:.2%}" for r in ratios])
-        #                 self._notify_signal(
-        #                     f"CHoCH confirmed on 1m: ⬆️ (#{swing1h.since_high} bars) | Market rebased {market_rebased} | OB: [{ratios_str}]",
-        #                     bar.bar_type.instrument_id,
-        #                     ratios=ratios,
-        #                 )
+            rebased_above_this_market = (
+                market_rebased_data.break_above
+                and market_rebased_data.break_above_market == market
+                and not market_rebased_data.break_above_triggered
+            )
+            rebased_below_this_market = (
+                market_rebased_data.break_below
+                and market_rebased_data.break_below_market == market
+                and not market_rebased_data.break_below_triggered
+            )
+            diff = market_data.session_high_price - market_data.session_low_price
+            diff_perp = diff / bar.close
+            if diff_perp < MARKETS[market].min_diff:
+                return
+            if (
+                rebased_above_this_market or market_data.session_high_duration < swing.period
+            ) and swing.direction == -1:
+                if self.config.log_data:
+                    if rebased_above_this_market:
+                        self.log.info(
+                            f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | Market rebased {market_rebased.name} on market {market.name} | Diff: [{diff_perp:.2%}]",
+                            LogColor.RED,
+                        )
+                    else:
+                        self.log.info(
+                            f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | New high on market {market.name} | Diff: [{diff_perp:.2%}]",
+                            LogColor.RED,
+                        )
+                market_rebased_data.break_above_triggered = True
+                swing_data = SwingData(
+                    instrument_id=bar.bar_type.instrument_id,
+                    bar_type=bar.bar_type,
+                    order_side=OrderSide.SELL,
+                    high_price=swing.high_price,
+                    low_price=swing.low_price,
+                    duration=swing.duration,
+                )
+                self.publish_data(DataType(SwingData), swing_data)
+            elif (
+                rebased_below_this_market or market_data.session_low_duration < swing.period
+            ) and swing.direction == 1:
+                if self.config.log_data:
+                    if rebased_below_this_market:
+                        self.log.info(
+                            f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | Market rebased {market_rebased.name} on market {market.name} | Diff: [{diff_perp:.2%}]",
+                            LogColor.GREEN,
+                        )
+                    else:
+                        self.log.info(
+                            f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | New low on market {market.name} | Diff: [{diff_perp:.2%}]",
+                            LogColor.GREEN,
+                        )
+                market_rebased_data.break_below_triggered = True
+                swing_data = SwingData(
+                    instrument_id=bar.bar_type.instrument_id,
+                    bar_type=bar.bar_type,
+                    order_side=OrderSide.BUY,
+                    high_price=swing.high_price,
+                    low_price=swing.low_price,
+                    duration=swing.duration,
+                )
+                self.publish_data(DataType(SwingData), swing_data)
 
     def on_historical_data(self, data: Any) -> None:
         """
@@ -296,41 +338,23 @@ class SwingDetector(Actor):
         if isinstance(data, Bar):
             self.update_market_opening(unix_nanos_to_dt(data.ts_event))
             self.update_market_data(data)
+            self.on_bar(data)
             if "BTCUSDT" in str(data.bar_type):
-                swing30m = self._swings_fast[data.bar_type.instrument_id]
-                swing1h = self._swings_slow[data.bar_type.instrument_id]
-                if swing30m.changed:
+                swings = self._swings[data.bar_type.instrument_id]
+                if swings.changed:
                     datetime = (
-                        swing30m.low_datetime
-                        if swing30m.direction == -1
-                        else swing30m.high_datetime
+                        swings.low_datetime if swings.direction == -1 else swings.high_datetime
                     )
                     self.log.info(
                         "Datetime: "
                         + str(datetime)
                         + " | Swing1m: "
-                        + str(swing30m.direction)
+                        + str(swings.direction)
                         + " ("
-                        + str(swing30m.length)
+                        + str(swings.length)
                         + ")",
                         LogColor.CYAN,
                     )
-                if swing1h.changed:
-                    datetime = (
-                        swing1h.low_datetime if swing1h.direction == -1 else swing1h.high_datetime
-                    )
-                    self.log.info(
-                        "Datetime: "
-                        + str(datetime)
-                        + " | Swing1h: "
-                        + str(swing1h.direction)
-                        + " ("
-                        + str(swing1h.length)
-                        + ")",
-                        LogColor.YELLOW,
-                    )
-            if "1-MINUTE" not in str(data.bar_type.spec):
-                return
 
     def update_market_data(self, bar: Bar) -> None:
         """
@@ -346,7 +370,51 @@ class SwingDetector(Actor):
             )
             self._open_market_data[bar.bar_type.instrument_id] = (current_market, market_data)
         else:
-            self._open_market_data[bar.bar_type.instrument_id][1].handle_bar(bar)
+            self._open_market_data[bar.bar_type.instrument_id][1].handle_bar_from_active_market(bar)
 
         for data in self._closed_market_data.get(bar.bar_type.instrument_id, {}).values():
-            data.handle_bar(bar)
+            data.handle_bar_from_closed_market(bar, current_market)
+
+    def most_recent_rebased_market(
+        self, instrument_id: InstrumentId
+    ) -> tuple[Market, MarketData] | tuple[None, None]:
+        """
+        Returns the most recent rebased market for the given instrument ID.
+
+        Parameters
+        ----------
+        instrument_id : InstrumentId
+            The instrument ID to check.
+
+        Returns
+        -------
+        tuple[Market, MarketData] | tuple[None, None]
+            A tuple containing the most recent rebased market and its corresponding MarketData,
+            or (None, None) if no rebased market is found.
+        """
+        closed_markets = self._closed_market_data.get(instrument_id, {})
+        if not closed_markets:
+            return None, None
+
+        # Sort markets by their break_above_duration and break_below_duration
+        def sort_key(item):
+            _, data = item
+            if data.break_above and data.break_below:
+                return min(data.break_above_duration, data.break_below_duration)
+            elif data.break_above:
+                return data.break_above_duration
+            elif data.break_below:
+                return data.break_below_duration
+            else:
+                return math.inf
+
+        sorted_markets = sorted(
+            closed_markets.items(),
+            key=sort_key,
+        )
+
+        for market, data in sorted_markets:
+            if data.break_above or data.break_below:
+                return market, data
+
+        return None, None

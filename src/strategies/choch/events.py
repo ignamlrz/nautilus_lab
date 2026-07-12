@@ -5,6 +5,23 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 
 @customdataclass
+class SwingData(Data):
+    instrument_id: InstrumentId
+    bar_type: str
+    order_side: str
+    high_price: float
+    low_price: float
+    duration: int
+
+
+@customdataclass
+class OpenMarketData(Data):
+    market: str
+    min_diff: float
+    operable: bool
+
+
+@customdataclass
 class ChangeOfCharacterConfirmationData(Data):
     instrument_id: InstrumentId
     bar_type: str

@@ -6,6 +6,7 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.common.config import PositiveInt
 from nautilus_trader.common.enums import LogColor
+from nautilus_trader.core import UUID4
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import DataType
@@ -15,6 +16,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from src.strategies.choch.enums import BosEvent
 from src.strategies.choch.events import ChangeOfCharacterConfirmationData
+from src.strategies.choch.events import OpenMarketData
 
 
 @dataclass
@@ -39,6 +41,8 @@ class BreakOfStructureData:
     duration: int = 0
     # choch
     choc_triggered: bool = False
+    # markets
+    market_without_update: int = 0
 
     @property
     def length(self) -> float:
@@ -144,6 +148,7 @@ class BreakOfStructureData:
         self.low_duration = -1
         self.duration = -1
         self.choc_triggered = False
+        self.market_without_update = 0
 
     def __high_low_prices(self, bar: Bar) -> tuple[float, float]:
         if self.use_wicks:
@@ -165,8 +170,8 @@ class ChangeOfCharacterDetectorConfig(ActorConfig, frozen=True):
     client_id: ClientId | None = None
     log_data: bool = True
     use_wicks: bool = True
-    period: PositiveInt = 5
-    mss_period: PositiveInt = 5
+    bos_period: PositiveInt = 5
+    market_period: PositiveInt = 2
 
 
 class ChangeOfCharacterDetector(Actor):
@@ -177,28 +182,40 @@ class ChangeOfCharacterDetector(Actor):
 
         self._bos: dict[InstrumentId, BreakOfStructureData] = {}
         self._temp_choch_bos: dict[InstrumentId, BreakOfStructureData] = {}
+        self._is_historical = False
+
+        self._subscribe_bars_uuid_map: dict[UUID4, BarType] = {}
 
     def on_start(self) -> None:
         client_id = self.config.client_id
         requests_start = self.clock.utc_now() - pd.Timedelta(minutes=1440)
+
+        self.subscribe_data(DataType(OpenMarketData), client_id=client_id)
 
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self._bos.setdefault(
                 instrument_id,
                 BreakOfStructureData.empty(
-                    bar_type=bar_type, period=self.config.period, use_wicks=self.config.use_wicks
+                    bar_type=bar_type,
+                    period=self.config.bos_period,
+                    use_wicks=self.config.use_wicks,
                 ),
             )
+            uuid = UUID4()
+            self._subscribe_bars_uuid_map[uuid] = bar_type
             self.request_bars(
                 bar_type=bar_type,
                 start=requests_start,
                 client_id=client_id,
-                callback=lambda _: self.subscribe_bars(
-                    bar_type=bar_type,
-                    client_id=client_id,
-                ),
+                callback=self.request_bars_finished,
+                request_id=uuid,
             )
+
+    def request_bars_finished(self, uuid: UUID4) -> None:
+        bar_type = self._subscribe_bars_uuid_map.pop(uuid, None)
+        if bar_type is not None:
+            self.subscribe_bars(bar_type=bar_type, client_id=self.config.client_id)
 
     def on_stop(self) -> None:
         client_id = self.config.client_id
@@ -206,6 +223,34 @@ class ChangeOfCharacterDetector(Actor):
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self.unsubscribe_bars(bar_type=bar_type, client_id=client_id)
+
+    def on_open_market_data(self, data: OpenMarketData) -> None:
+        for instrument_id in self._bos:
+            bos = self._bos[instrument_id]
+            bos.market_without_update += 1
+            if bos.market_without_update < self.config.market_period:
+                continue
+            # restore bos to the last known high and low prices
+            start = bos.high_duration if bos.order_side == OrderSide.BUY else bos.low_duration
+            self._is_historical = True
+            first_time = True
+            while (
+                first_time
+                or self._bos[instrument_id].mss is None
+                or self._bos[instrument_id].bos == self._bos[instrument_id].mss
+            ):
+                self._temp_choch_bos.pop(instrument_id, None)
+                self._bos[instrument_id] = BreakOfStructureData.empty(
+                    bar_type=bos.bar_type,
+                    period=self.config.bos_period,
+                    use_wicks=self.config.use_wicks,
+                )
+                for i in range(start, -1, -1):
+                    bar = self.cache.bar(bar_type=bos.bar_type, index=i)
+                    self.on_bar(bar)
+                start -= 1
+                first_time = False
+            self._is_historical = False
 
     def on_bar(self, bar: Bar) -> None:
         bar_type = bar.bar_type
@@ -248,27 +293,37 @@ class ChangeOfCharacterDetector(Actor):
                         choc_price=bos.choc,
                         choc_duration=bos.choc_duration,
                         # mss info
-                        mss_price=mss.mss if mss else None,
-                        mss_duration=mss.mss_duration if mss.mss_duration else None,
+                        mss_price=mss.mss if mss and mss.mss != temp_choch_bos.bos else None,
+                        mss_duration=mss.mss_duration
+                        if mss and mss.mss != temp_choch_bos.bos
+                        else None,
                         # ts event
                         ts_init=self.cache.bar(
                             bar_type=bar_type, index=temp_choch_bos.bos_duration
                         ).ts_event,
                         ts_event=self.clock.timestamp_ns(),
                     )
-                    if self.config.log_data:
+                    if not self._is_historical:
+                        self.publish_data(DataType(ChangeOfCharacterConfirmationData), data)
                         self.log.info(data.__repr__(), color=LogColor.CYAN)
-                    self.publish_data(DataType(ChangeOfCharacterConfirmationData), data)
 
     def on_historical_data(self, data):
         if isinstance(data, Bar):
+            self._is_historical = True
             self.on_bar(data)
+            self._is_historical = False
+        if isinstance(data, OpenMarketData):
+            self.on_open_market_data(data)
+
+    def on_data(self, data):
+        if isinstance(data, OpenMarketData):
+            self.on_open_market_data(data)
 
     def calc_mss(
         self, bar_type: BarType, order_side: OrderSide, duration: int
     ) -> BreakOfStructureData:
         bos_1 = BreakOfStructureData.empty(
-            bar_type=bar_type, period=self.config.mss_period, use_wicks=self.config.use_wicks
+            bar_type=bar_type, period=self.config.bos_period, use_wicks=self.config.use_wicks
         )
         bos_2 = None
         for i in range(duration, -1, -1):
@@ -277,7 +332,7 @@ class ChangeOfCharacterDetector(Actor):
             if event_1 == BosEvent.CHOCH_DETECTED:
                 bos_2 = BreakOfStructureData.empty(
                     bar_type=bar_type,
-                    period=self.config.mss_period,
+                    period=self.config.bos_period,
                     use_wicks=self.config.use_wicks,
                 )
                 bos_2.handle_bar(bar)
@@ -296,7 +351,7 @@ class ChangeOfCharacterDetector(Actor):
 
     def on_choch_detected(self, bar: Bar) -> None:
         new_bos = BreakOfStructureData.empty(
-            bar_type=bar.bar_type, period=self.config.period, use_wicks=self.config.use_wicks
+            bar_type=bar.bar_type, period=self.config.bos_period, use_wicks=self.config.use_wicks
         )
         new_bos.handle_bar(bar)
         self._temp_choch_bos[bar.bar_type.instrument_id] = new_bos
