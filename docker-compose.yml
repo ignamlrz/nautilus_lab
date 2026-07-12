@@ -50,6 +50,31 @@ services:
       timeout: 5s
       retries: 3
 
+  swing-live:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nautilus-lab:latest
+    container_name: nautilus-swing-live
+    command:
+      - "-c"
+      - "/app/config/system/binance-paper-trading.yaml"
+      - "-s"
+      - "/app/config/strategies/swing-detector.yaml"
+    env_file: [.env]
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./logs/swing-live:/app/logs
+    restart: unless-stopped
+    # The trading loop doesn't expose an HTTP port by default. Adjust or
+    # remove this block if you front it with the API server in src/api/server/.
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   data-tester-live:
     image: nautilus-lab:latest
     container_name: nautilus-data-tester-live

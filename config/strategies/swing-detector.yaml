@@ -1,0 +1,36 @@
+strategies:
+  - strategy_path: src.strategies.choch.strategy:ChangeOfCharacterStrategy
+    config_path: src.strategies.choch.strategy:ChangeOfCharacterStrategyConfig
+    config:
+      log_commands: False
+      log_events: False
+actors:
+  - actor_path: src.strategies.choch.actors.swing_detector:SwingDetector
+    config_path: src.strategies.choch.actors.swing_detector:SwingDetectorConfig
+    config:
+      log_data: False
+      instrument_ids:
+        # crypto
+        - BTCUSDT-PERP.BINANCE_FUTURES
+        - ETHUSDT-PERP.BINANCE_FUTURES
+        - XRPUSDT-PERP.BINANCE_FUTURES
+        - SOLUSDT-PERP.BINANCE_FUTURES
+        - BNBUSDT-PERP.BINANCE_FUTURES
+        - DOGEUSDT-PERP.BINANCE_FUTURES
+        - HYPEUSDT-PERP.BINANCE_FUTURES
+        - XLMUSDT-PERP.BINANCE_FUTURES
+        # metales
+        - XAUUSDT-PERP.BINANCE_FUTURES
+        - XAGUSDT-PERP.BINANCE_FUTURES
+        - XPTUSDT-PERP.BINANCE_FUTURES
+        - BZUSDT-PERP.BINANCE_FUTURES
+        - NATGASUSDT-PERP.BINANCE_FUTURES
+        # acciones
+        - NVDAUSDT-PERP.BINANCE_FUTURES
+        - MSFTUSDT-PERP.BINANCE_FUTURES
+        - AAPLUSDT-PERP.BINANCE_FUTURES
+        - GOOGLUSDT-PERP.BINANCE_FUTURES
+        - METAUSDT-PERP.BINANCE_FUTURES
+        - AMZNUSDT-PERP.BINANCE_FUTURES
+        - TSLAUSDT-PERP.BINANCE_FUTURES
+        - SPCXUSDT-PERP.BINANCE_FUTURES
