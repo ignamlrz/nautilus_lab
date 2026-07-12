@@ -24,6 +24,8 @@ from pydantic import PositiveInt
 from src.notifications import SyncTelegramBridge
 from src.notifications import TelegramNotifier
 from src.strategies.choch.events import ChangeOfCharacterConfirmationData
+from src.strategies.choch.events import OpenMarketData
+from src.strategies.choch.events import SwingData
 
 
 class ChangeOfCharacterStrategyConfig(StrategyConfig):
@@ -86,7 +88,7 @@ class InstrumentState:
             return True
         return False
 
-    def update_from_bar(self, bar: Bar, instrument: Instrument) -> None:
+    def update_from_bar(self, bar: Bar) -> None:
         if self.order_side == OrderSide.BUY:
             if bar.high > self.signal_high_price:
                 self.price_stop_loss = bar.low
@@ -101,16 +103,21 @@ class ChangeOfCharacterStrategy(Strategy):
     def __init__(self, config: ChangeOfCharacterStrategyConfig):
         super().__init__(config)
         self._telegram: SyncTelegramBridge | None = None
-        self._state: dict[InstrumentId, InstrumentState] = {}
+        self._instrument_state: dict[InstrumentId, InstrumentState] = {}
+        self._swing_signal: dict[InstrumentId, SwingData] = {}
+        self._choc_confirmation: dict[InstrumentId, ChangeOfCharacterConfirmationData] = {}
 
     def on_start(self):
         # Initialize the telegram bridge if running in live mode
         if isinstance(self.clock, LiveClock):
             self._telegram = SyncTelegramBridge(TelegramNotifier.from_env())
 
-        # subscribe to CHoCH data
-        self.subscribe_data(DataType(ChangeOfCharacterData), client_id=self.config.client_id)
-        self.submit_order
+        # subscribe to swing data and change of character confirmation data
+        self.subscribe_data(DataType(SwingData), client_id=self.config.client_id)
+        self.subscribe_data(
+            DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
+        )
+        self.subscribe_data(DataType(OpenMarketData), client_id=self.config.client_id)
 
     def on_stop(self):
         # Close the telegram bridge first; idempotent.
@@ -118,20 +125,25 @@ class ChangeOfCharacterStrategy(Strategy):
             self._telegram.close()
             self._telegram = None
 
-        for instrument_id in self._state.keys():
+        for instrument_id in self._instrument_state.keys():
             self._cancel_signal_for_instrument(instrument_id)
 
-        # unsubscribe to CHoCH data
-        self.unsubscribe_data(DataType(ChangeOfCharacterData), client_id=self.config.client_id)
+        # unsubscribe to swing data and change of character confirmation data
+        self.unsubscribe_data(DataType(SwingData), client_id=self.config.client_id)
+        self.unsubscribe_data(
+            DataType(ChangeOfCharacterConfirmationData), client_id=self.config.client_id
+        )
+        self.unsubscribe_data(DataType(OpenMarketData), client_id=self.config.client_id)
 
     def on_bar(self, bar: Bar):
         instrument_id = bar.bar_type.instrument_id
-        if instrument_id not in self._ob_liquidity:
+        if instrument_id not in self._swing_signal and instrument_id not in self._choc_confirmation:
             return
+        # check for possible entry
         if bar.bar_type.spec.timedelta == pd.Timedelta(minutes=1):
             self.update_rsi(bar)
             self._ema_history[instrument_id].appendleft(self._ema[instrument_id].value)
-        data = self._ob_liquidity[instrument_id]
+        data = self._swing_signal[instrument_id]
         rsi = self._rsi[instrument_id]
         ema = self._ema[instrument_id]
         if not rsi.initialized or not ema.initialized:
@@ -213,33 +225,39 @@ class ChangeOfCharacterStrategy(Strategy):
                     break
 
     def on_data(self, data):
-        if isinstance(data, ChangeOfCharacterData):
-            # check if has indicators initialized
-            if data.instrument_id not in self._rsi or data.instrument_id not in self._ema:
-                self.setup_indicators(data.instrument_id)
+        if isinstance(data, SwingData):
+            self.on_swing_data(data)
 
-            if data.order_side == OrderSide.NO_ORDER_SIDE:
-                self._notify_telegram("ℹ️ INFO", data.instrument_id, data.label)
-                return
+    def on_swing_data(self, data: SwingData):
+        if data.order_side == OrderSide.NO_ORDER_SIDE:
+            self._notify_telegram("ℹ️ INFO", data.instrument_id, data.label)
+            return
 
-            if not self.prev_bars_was_below_ema(data):
-                self.log.info(
-                    f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
-                )
-                text = f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
-                self._notify_telegram(data.label, data.instrument_id, text=text)
-                return
-            self._ob_liquidity[data.instrument_id] = data
+        if not self.prev_bars_was_below_ema(data):
             self.log.info(
-                f"Received signal: {data.label} for instrument: {data.instrument_id} with ratios: {data.ratios}"
+                f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
             )
-            self._notify_telegram(data.label, data.instrument_id, text=f"Ratios: {data.ratios}")
-            self.clock.set_time_alert(
-                name=f"OrderbookStrategy:{data.instrument_id}",
-                alert_time=self.clock.utc_now() + pd.Timedelta(minutes=10, seconds=10),
-                callback=lambda e: self._ob_liquidity.pop(data.instrument_id, None),
-                override=True,
-            )
+            text = f"Skipping signal: {data.label} for instrument: {data.instrument_id} because previous bars were not below/above EMA"
+            self._notify_telegram(data.label, data.instrument_id, text=text)
+            return
+        self._swing_signal[data.instrument_id] = data
+        self.log.info(
+            f"Received signal: {data.label} for instrument: {data.instrument_id} with ratios: {data.ratios}"
+        )
+        self._notify_telegram(data.label, data.instrument_id, text=f"Ratios: {data.ratios}")
+        self.clock.set_time_alert(
+            name=f"OrderbookStrategy:{data.instrument_id}",
+            alert_time=self.clock.utc_now() + pd.Timedelta(minutes=10, seconds=10),
+            callback=lambda e: self._swing_signal.pop(data.instrument_id, None),
+            override=True,
+        )
+
+    def on_change_of_character_confirmation_data(self, data: ChangeOfCharacterConfirmationData):
+        self._choc_confirmation[data.instrument_id] = data
+        self._on_change_of_character_data(data)
+
+    def on_open_market_data(self, data: OpenMarketData):
+        pass
 
     def buy(self, instrument: Instrument, balance_free: Money, label: str):
         bar_type = BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
@@ -274,7 +292,7 @@ class ChangeOfCharacterStrategy(Strategy):
             LogColor.GREEN,
         )
         self._notify_telegram(f"{label} - Created", instrument.id, text)
-        self._ob_liquidity.pop(instrument.id, None)
+        self._swing_signal.pop(instrument.id, None)
         return order_list
 
     def sell(self, instrument: Instrument, balance_free: Money, label: str):
@@ -311,11 +329,23 @@ class ChangeOfCharacterStrategy(Strategy):
             f"Created bracket order for instrument: {instrument.id} with entry price: {entry_price}, stop-loss price: {sl_price}, take-profit price: {tp_price}, quantity: {quantity}",
             LogColor.GREEN,
         )
-        self._ob_liquidity.pop(instrument.id, None)
+        self._swing_signal.pop(instrument.id, None)
         return order_list
 
     def _on_change_of_character_data(self, data: ChangeOfCharacterConfirmationData) -> None:
         instrument_id = data.instrument_id
+        if instrument_id not in self._swing_signal:
+            self.log.warning(
+                f"Received ChangeOfCharacterData for instrument: {instrument_id} with no previous swing signal. Ignoring."
+            )
+            return
+        swing_signal = self._swing_signal[instrument_id]
+        if swing_signal.order_side != data.order_side:
+            self.log.warning(
+                f"Received ChangeOfCharacterData for instrument: {instrument_id} with different order side than previous swing signal. Ignoring."
+            )
+            return
+        self._choc_confirmation[data.instrument_id] = data
         instrument = self.cache.instrument(instrument_id)
         date_start = self.clock.utc_now()
         date_expiration = date_start + self.config.signal_expiration
@@ -367,14 +397,14 @@ class ChangeOfCharacterStrategy(Strategy):
         )
 
         set_time_alert = True
-        if instrument_id in self._state:
-            prev_state = self._state[instrument_id]
+        if instrument_id in self._instrument_state:
+            prev_state = self._instrument_state[instrument_id]
             if prev_state.order_side != state.order_side:
                 self.log.info(
                     f"Received ChangeOfCharacterData for instrument: {instrument_id} with different order side. Unsubscribing bars and removing previous state."
                 )
                 self._cancel_signal_for_instrument(instrument_id)
-                self._state[instrument_id] = state
+                self._instrument_state[instrument_id] = state
             else:
                 self.log.info(
                     f"Received ChangeOfCharacterData for instrument: {instrument_id} with same order side. Updating state."
@@ -390,7 +420,7 @@ class ChangeOfCharacterStrategy(Strategy):
             self.log.info(
                 f"Received ChangeOfCharacterData for instrument: {instrument_id} with no previous state. Setting new state."
             )
-            self._state[instrument_id] = state
+            self._instrument_state[instrument_id] = state
 
         if set_time_alert:
             self.clock.set_time_alert(
@@ -433,9 +463,9 @@ class ChangeOfCharacterStrategy(Strategy):
         self._cancel_signal_for_instrument(instrument_id)
 
     def _cancel_signal_for_instrument(self, instrument_id: InstrumentId) -> None:
-        if instrument_id not in self._state:
+        if instrument_id not in self._instrument_state:
             return
-        state = self._state[instrument_id]
+        state = self._instrument_state[instrument_id]
         position_side = (
             PositionSide.LONG if state.order_side == OrderSide.BUY else PositionSide.SHORT
         )
@@ -452,4 +482,4 @@ class ChangeOfCharacterStrategy(Strategy):
                     f"Signal expired for instrument: {instrument_id} with no open orders."
                 )
             self.unsubscribe_bars(state.bar_type, client_id=self.config.client_id)
-            self._state.pop(instrument_id)
+            self._instrument_state.pop(instrument_id)

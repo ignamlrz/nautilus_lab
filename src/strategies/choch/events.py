@@ -6,6 +6,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 @customdataclass
 class SwingData(Data):
+    label: str
     instrument_id: InstrumentId
     bar_type: str
     order_side: str
@@ -16,6 +17,7 @@ class SwingData(Data):
 
 @customdataclass
 class OpenMarketData(Data):
+    label: str
     market: str
     min_diff: float
     operable: bool
@@ -23,6 +25,7 @@ class OpenMarketData(Data):
 
 @customdataclass
 class ChangeOfCharacterConfirmationData(Data):
+    label: str
     instrument_id: InstrumentId
     bar_type: str
     order_side: str
@@ -38,11 +41,15 @@ class ChangeOfCharacterConfirmationData(Data):
     mss_duration: int
 
     def __repr__(self):
+        if isinstance(self.order_side, str):
+            order_side = OrderSide[self.order_side]
+        else:
+            order_side = self.order_side
         return (
             f"ChangeOfCharacterConfirmationData("
             f"Bar Type={self.bar_type}, "
-            f"Side={self.order_side.name if isinstance(self.order_side, OrderSide) else self.order_side}, "
-            f"Global {'Min' if str(self.order_side) == 'BUY' else 'Max'}={self.global_peak_price}, "
+            f"Side={order_side.name}, "
+            f"Global {'Min' if order_side == OrderSide.BUY else 'Max'}={self.global_peak_price}, "
             f"BoS={self.bos_price}, "
             f"CHoC={self.choc_price}, "
             f"MSS={self.mss_price})"

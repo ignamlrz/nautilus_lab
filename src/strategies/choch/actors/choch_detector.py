@@ -16,7 +16,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from src.strategies.choch.enums import BosEvent
 from src.strategies.choch.events import ChangeOfCharacterConfirmationData
-from src.strategies.choch.events import OpenMarketData
+from src.strategies.choch.events import SwingData
 
 
 @dataclass
@@ -43,6 +43,9 @@ class BreakOfStructureData:
     choc_triggered: bool = False
     # markets
     market_without_update: int = 0
+    # conditions
+    recently_created_bos: bool = False
+    exists_empty_price_on_bos: bool = False
 
     @property
     def length(self) -> float:
@@ -73,9 +76,14 @@ class BreakOfStructureData:
 
     def __handle_buyer_bos(self, bar: Bar) -> BosEvent:
         high, low = self.__high_low_prices(bar)
+        if bar.high < self.high_price:
+            self.exists_empty_price_on_bos = True
         if bar.close > self.high_price:
+            if self.recently_created_bos and self.high_duration < 2:
+                self.__restore(high, low)
             event = BosEvent.NONE
-            if self.high_duration >= self.period:
+            if self.high_duration >= self.period and self.exists_empty_price_on_bos:
+                self.recently_created_bos = True
                 self.bos = self.high_price
                 self.bos_duration = self.high_duration
                 self.choc = self.low_price
@@ -102,9 +110,13 @@ class BreakOfStructureData:
 
     def __handle_seller_bos(self, bar: Bar) -> BosEvent:
         high, low = self.__high_low_prices(bar)
+        if bar.low > self.low_price:
+            self.exists_empty_price_on_bos = True
         if bar.close < self.low_price:
+            if self.recently_created_bos and self.low_duration < 2:
+                self.__restore(high, low)
             event = BosEvent.NONE
-            if self.low_duration >= self.period:
+            if self.low_duration >= self.period and self.exists_empty_price_on_bos:
                 self.bos = self.low_price
                 self.bos_duration = self.low_duration
                 self.choc = self.high_price
@@ -149,6 +161,7 @@ class BreakOfStructureData:
         self.duration = -1
         self.choc_triggered = False
         self.market_without_update = 0
+        self.exists_empty_price_on_bos = False
 
     def __high_low_prices(self, bar: Bar) -> tuple[float, float]:
         if self.use_wicks:
@@ -169,9 +182,9 @@ class ChangeOfCharacterDetectorConfig(ActorConfig, frozen=True):
     bar_type_spec: str = "1-MINUTE-LAST-EXTERNAL"
     client_id: ClientId | None = None
     log_data: bool = True
-    use_wicks: bool = True
-    bos_period: PositiveInt = 5
-    market_period: PositiveInt = 2
+    use_wicks: bool = False
+    bos_period: PositiveInt = 3
+    max_box_duration: PositiveInt = 100
 
 
 class ChangeOfCharacterDetector(Actor):
@@ -190,7 +203,7 @@ class ChangeOfCharacterDetector(Actor):
         client_id = self.config.client_id
         requests_start = self.clock.utc_now() - pd.Timedelta(minutes=1440)
 
-        self.subscribe_data(DataType(OpenMarketData), client_id=client_id)
+        self.subscribe_data(DataType(SwingData), client_id=client_id)
 
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
@@ -224,33 +237,27 @@ class ChangeOfCharacterDetector(Actor):
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self.unsubscribe_bars(bar_type=bar_type, client_id=client_id)
 
-    def on_open_market_data(self, data: OpenMarketData) -> None:
-        for instrument_id in self._bos:
-            bos = self._bos[instrument_id]
-            bos.market_without_update += 1
-            if bos.market_without_update < self.config.market_period:
-                continue
-            # restore bos to the last known high and low prices
-            start = bos.high_duration if bos.order_side == OrderSide.BUY else bos.low_duration
-            self._is_historical = True
-            first_time = True
-            while (
-                first_time
-                or self._bos[instrument_id].mss is None
-                or self._bos[instrument_id].bos == self._bos[instrument_id].mss
-            ):
-                self._temp_choch_bos.pop(instrument_id, None)
-                self._bos[instrument_id] = BreakOfStructureData.empty(
-                    bar_type=bos.bar_type,
-                    period=self.config.bos_period,
-                    use_wicks=self.config.use_wicks,
-                )
-                for i in range(start, -1, -1):
-                    bar = self.cache.bar(bar_type=bos.bar_type, index=i)
-                    self.on_bar(bar)
-                start -= 1
-                first_time = False
-            self._is_historical = False
+    def on_swing_data(self, data: SwingData) -> None:
+        instrument_id = data.instrument_id
+        if instrument_id not in self._bos:
+            return
+        bos = self._bos[instrument_id]
+        bos.market_without_update += 1
+        if bos.bos_duration < self.config.max_box_duration:
+            return
+        # restore bos to the last known high and low prices
+        start = self.config.max_box_duration
+
+        self._temp_choch_bos.pop(instrument_id, None)
+        self._bos[instrument_id] = BreakOfStructureData.empty(
+            bar_type=bos.bar_type,
+            period=self.config.bos_period,
+            use_wicks=self.config.use_wicks,
+        )
+        for i in range(start, -1, -1):
+            bar = self.cache.bar(bar_type=bos.bar_type, index=i)
+            self.on_bar(bar)
+        start -= 1
 
     def on_bar(self, bar: Bar) -> None:
         bar_type = bar.bar_type
@@ -278,6 +285,12 @@ class ChangeOfCharacterDetector(Actor):
                         if temp_choch_bos.order_side == OrderSide.BUY
                         else bos.high_duration
                     )
+                    _bar = self.cache.bar(bar_type=bar_type, index=duration)
+                    if temp_choch_bos.order_side == OrderSide.SELL and _bar.close > _bar.open:
+                        duration -= 1
+                    if temp_choch_bos.order_side == OrderSide.BUY and _bar.close < _bar.open:
+                        duration -= 1
+
                     mss = self.calc_mss(bar_type, temp_choch_bos.order_side, duration)
                     data = ChangeOfCharacterConfirmationData(
                         instrument_id=instrument_id,
@@ -302,6 +315,7 @@ class ChangeOfCharacterDetector(Actor):
                             bar_type=bar_type, index=temp_choch_bos.bos_duration
                         ).ts_event,
                         ts_event=self.clock.timestamp_ns(),
+                        label="Change of Character Confirmation",
                     )
                     if not self._is_historical:
                         self.publish_data(DataType(ChangeOfCharacterConfirmationData), data)
@@ -312,12 +326,12 @@ class ChangeOfCharacterDetector(Actor):
             self._is_historical = True
             self.on_bar(data)
             self._is_historical = False
-        if isinstance(data, OpenMarketData):
-            self.on_open_market_data(data)
+        if isinstance(data, SwingData):
+            self.on_swing_data(data)
 
     def on_data(self, data):
-        if isinstance(data, OpenMarketData):
-            self.on_open_market_data(data)
+        if isinstance(data, SwingData):
+            self.on_swing_data(data)
 
     def calc_mss(
         self, bar_type: BarType, order_side: OrderSide, duration: int
