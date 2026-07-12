@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
-            "args": ["-c", "${workspaceFolder}/config/system/backtest.yaml", "-s", "${workspaceFolder}/config/strategies/data-tester.yaml"],
+            "args": ["-c", "${workspaceFolder}/config/system/backtest.yaml", "-s", "${workspaceFolder}/config/strategies/choch-detector.yaml"],
             "justMyCode": false
         },
         {

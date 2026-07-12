@@ -1,0 +1,19 @@
+strategies: []
+  # - strategy_path: src.strategies.choch.strategy:ChangeOfCharacterStrategy
+  #   config_path: src.strategies.choch.strategy:ChangeOfCharacterStrategyConfig
+  #   config: {}
+actors:
+  - actor_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetector
+    config_path: src.strategies.choch.actors.choch_detector:ChangeOfCharacterDetectorConfig
+    config:
+      log_data: True
+      instrument_ids:
+        # crypto
+        - BTCUSDT-PERP.BINANCE_FUTURES
+  # - actor_path: src.strategies.choch.actors.swing_detector:SwingDetector
+  #   config_path: src.strategies.choch.actors.swing_detector:SwingDetectorConfig
+  #   config:
+  #     log_data: True
+  #     instrument_ids:
+  #       # crypto
+  #       - BTCUSDT-PERP.BINANCE_FUTURES
