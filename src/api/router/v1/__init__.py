@@ -8,6 +8,7 @@ unambiguously.
 
 from aiohttp import web
 
+from .drawing import DrawingRouter
 from .exchange import ExchangeRouter
 from .market import MarketRouter
 
@@ -18,12 +19,14 @@ app = web.Application()
 
 exchange = ExchangeRouter(app)
 market = MarketRouter(app)
+drawing = DrawingRouter(app)
 
 app.add_routes(
     [
         web.get("/exchangeInfo", handler=exchange.exchange_info, name=f"{NAME_PREFIX}exchangeInfo"),
         web.get("/klines", handler=market.klines, name=f"{NAME_PREFIX}klines"),
         web.get("/ticker/24hr", handler=market.ticker24hour, name=f"{NAME_PREFIX}ticker24hr"),
+        web.get("/drawings", handler=drawing.drawings, name=f"{NAME_PREFIX}drawings"),
     ]
 )
 

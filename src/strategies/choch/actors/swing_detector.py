@@ -11,6 +11,7 @@ from nautilus_trader.common.config import PositiveInt
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.core import UUID4
+from nautilus_trader.core.datetime import dt_to_unix_nanos
 from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.indicators import Swings
 from nautilus_trader.model.data import Bar
@@ -21,8 +22,10 @@ from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import InstrumentId
 
 from src.helpers.market_hours import MarketHours
+from src.helpers.market_hours import open_now
 from src.helpers.market_hours import upcoming
 from src.strategies.choch.enums import Market
+from src.strategies.choch.events import ClosedMarketData
 from src.strategies.choch.events import OpenMarketData
 from src.strategies.choch.events import SwingData
 
@@ -33,11 +36,14 @@ class MarketInfo:
     min_diff: float
     operable: bool
     max_diff: float = 1.0
+    color: str = "#3051E2"
 
 
 @dataclass
 class MarketData:
     market_info: MarketInfo
+    open_datetime: pd.Timestamp
+    close_datetime: pd.Timestamp
     next_epoch: pd.Timestamp
     use_wicks: bool
     # current session
@@ -63,8 +69,13 @@ class MarketData:
     @classmethod
     def create(cls, market_info: MarketInfo, bar: Bar, use_wicks: bool = False) -> MarketData:
         next_epoch = market_info.hours.next_open(unix_nanos_to_dt(bar.ts_event)).tz_convert("UTC")
+        upcoming_markets = upcoming(
+            [v.hours for v in MARKETS.values()], unix_nanos_to_dt(bar.ts_event)
+        )
         return cls(
             market_info=market_info,
+            open_datetime=unix_nanos_to_dt(bar.ts_event),
+            close_datetime=upcoming_markets[0][1].tz_convert("UTC"),
             next_epoch=next_epoch,
             use_wicks=use_wicks,
             session_high_price=bar.high,
@@ -116,35 +127,50 @@ class MarketData:
 
 
 MARKETS = {
-    Market.SSE_SZSE: MarketInfo(
-        hours=MarketHours.continuous("Asia/Hong_Kong", 8, 0, 15, 0, name="SSE/SZSE"),
+    Market.ASIA: MarketInfo(
+        hours=MarketHours.continuous(
+            "Asia/Hong_Kong", 8, 0, 15, 0, name=Market.ASIA.name, use_weekends=True
+        ),
         min_diff=0.002,
         operable=True,
         max_diff=0.1,
+        color="#CBE45C",
     ),
-    Market.LSE: MarketInfo(
-        hours=MarketHours.continuous("Europe/London", 8, 0, 15, 0, name="LSE"),
+    Market.LONDON: MarketInfo(
+        hours=MarketHours.continuous(
+            "Europe/London", 8, 0, 15, 0, name=Market.LONDON.name, use_weekends=True
+        ),
         min_diff=0.002,
         operable=True,
         max_diff=0.1,
+        color="#4EBE54",
     ),
-    Market.PRE_NYSE: MarketInfo(
-        hours=MarketHours.continuous("America/New_York", 8, 0, 9, 30, name="PRE_NYSE"),
+    Market.EEUU_PRE: MarketInfo(
+        hours=MarketHours.continuous(
+            "America/New_York", 8, 0, 9, 30, name=Market.EEUU_PRE.name, use_weekends=True
+        ),
         min_diff=0.002,
         operable=False,
         max_diff=0.1,
+        color="#E23030",
     ),
-    Market.NYSE: MarketInfo(
-        hours=MarketHours.continuous("America/New_York", 9, 30, 16, 0, name="NYSE"),
+    Market.EEUU: MarketInfo(
+        hours=MarketHours.continuous(
+            "America/New_York", 9, 30, 16, 0, name=Market.EEUU.name, use_weekends=True
+        ),
         min_diff=0.002,
         operable=True,
         max_diff=0.1,
+        color="#2BD0DB",
     ),
-    Market.POST_NYSE: MarketInfo(
-        hours=MarketHours.continuous("America/New_York", 16, 0, 20, 0, name="POST_NYSE"),
+    Market.EEUU_POST: MarketInfo(
+        hours=MarketHours.continuous(
+            "America/New_York", 16, 0, 20, 0, name=Market.EEUU_POST.name, use_weekends=True
+        ),
         min_diff=0.002,
         operable=True,
         max_diff=0.1,
+        color="#F5A623",
     ),
 }
 
@@ -184,78 +210,49 @@ class SwingDetector(Actor):
 
         # sort markets by their opening time
         self._sort_markets: list[str] = []
-        self._current_market: Market
-
-        self._subscribe_bars_uuid_map: dict[UUID4, BarType] = {}
-
-    def update_market_opening(self, date: datetime) -> None:
-        upcoming_markets = upcoming([v.hours for v in MARKETS.values()], date)
-        if upcoming_markets:
-            upcoming_markets = [(Market(v.name), t) for v, t in upcoming_markets]
-            if self._current_market == upcoming_markets[-1][0]:
-                return
-            self._upcoming_markets = upcoming_markets
-            self._current_market = self._upcoming_markets[-1][0]
-
-            for instrument_id in self._open_market_data:
-                market, data = self._open_market_data[instrument_id]
-                data.active = False
-                self._closed_market_data.setdefault(instrument_id, {})[market] = data
-
-    def on_market_opening_time_event(self, event: TimeEvent) -> None:
-        self.update_market_opening(unix_nanos_to_dt(event.ts_event))
-        _, next_open_time = self._upcoming_markets[0]
-        self.clock.set_time_alert(
-            name="SwingDetector:market_opening",
-            alert_time=next_open_time,
-            callback=self.on_market_opening_time_event,
-        )
-        open_market_data = OpenMarketData(
-            market=self._current_market.name,
-            min_diff=MARKETS[self._current_market].min_diff,
-            operable=MARKETS[self._current_market].operable,
-            label=f"Market {self._current_market.name} is now open. Operable: {MARKETS[self._current_market].operable}",
-            ts_init=self.clock.timestamp_ns(),
-            ts_event=self.clock.timestamp_ns(),
-        )
-        self.publish_data(DataType(OpenMarketData), open_market_data)
+        self._current_market: Market | None = None
+        self._next_market_opening: pd.Timestamp = unix_nanos_to_dt(0)
 
     def on_start(self) -> None:
         client_id = self.config.client_id
-        requests_start = self.clock.utc_now() - pd.Timedelta(minutes=1440)
+        requests_start = self.clock.utc_now() - pd.Timedelta(minutes=1440 * 3)
 
-        upcoming_markets = upcoming([v.hours for v in MARKETS.values()], self.clock.utc_now())
-        self._upcoming_markets = [(Market(v.name), t) for v, t in upcoming_markets]
-        if not self._upcoming_markets:
-            raise ValueError(
-                "No upcoming markets found. Please check the market hours configuration."
-            )
-        self._current_market = self._upcoming_markets[-1][0]
-        self.clock.set_time_alert(
-            name="SwingDetector:market_opening",
-            alert_time=self._upcoming_markets[0][1],
-            callback=self.on_market_opening_time_event,
-        )
+        self._current_market: Market | None = None
 
+        uuids: tuple[UUID4] = ()
         for instrument_id in self.config.instrument_ids or []:
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self._swings[instrument_id] = swings = Swings(period=self.config.period)
             self.register_indicator_for_bars(bar_type, swings)
 
             uuid = UUID4()
-            self._subscribe_bars_uuid_map[uuid] = bar_type
             self.request_bars(
                 bar_type=bar_type,
                 start=requests_start,
                 client_id=client_id,
-                callback=self.request_bars_finished,
                 request_id=uuid,
+                join_request=True,
+            )
+            uuids += (uuid,)
+
+        if uuids:
+            self.request_join(
+                request_ids=uuids,
+                start=requests_start,
+                client_id=client_id,
+                callback=self.on_start_finished,
             )
 
-    def request_bars_finished(self, uuid: UUID4) -> None:
-        bar_type = self._subscribe_bars_uuid_map.pop(uuid, None)
-        if bar_type is not None:
+    def on_start_finished(self, uuid: UUID4) -> None:
+        for instrument_id in self.config.instrument_ids or []:
+            bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self.subscribe_bars(bar_type=bar_type, client_id=self.config.client_id)
+            next_open_time = self.next_market_opening(self.clock.utc_now())[1]
+        self.clock.set_time_alert(
+            name="SwingDetector:market_opening",
+            alert_time=next_open_time,
+            callback=self.on_market_opening_time_event,
+        )
 
     def on_stop(self) -> None:
         client_id = self.config.client_id
@@ -316,6 +313,8 @@ class SwingDetector(Actor):
                             tested_price=md.session_high_price,
                             duration=swing.duration,
                             label=f"{text} | Broken Price: {md.session_high_price}",
+                            ts_init=self.clock.timestamp_ns(),
+                            ts_event=self.clock.timestamp_ns(),
                         )
                         self.publish_data(DataType(SwingData), swing_data)
                         break
@@ -341,6 +340,8 @@ class SwingDetector(Actor):
                             tested_price=md.session_low_price,
                             duration=swing.duration,
                             label=f"{text} | Broken Price: {md.session_low_price}",
+                            ts_init=self.clock.timestamp_ns(),
+                            ts_event=self.clock.timestamp_ns(),
                         )
                         self.publish_data(DataType(SwingData), swing_data)
                         break
@@ -353,28 +354,91 @@ class SwingDetector(Actor):
             self.update_market_opening(unix_nanos_to_dt(data.ts_event))
             self.update_market_data(data)
             self.on_bar(data)
-            if "BTCUSDT" in str(data.bar_type):
-                swings = self._swings[data.bar_type.instrument_id]
-                if swings.changed:
-                    datetime = (
-                        swings.low_datetime if swings.direction == -1 else swings.high_datetime
-                    )
-                    self.log.info(
-                        "Datetime: "
-                        + str(datetime)
-                        + " | Swing1m: "
-                        + str(swings.direction)
-                        + " ("
-                        + str(swings.length)
-                        + ")",
-                        LogColor.CYAN,
-                    )
+
+    def on_market_opening_time_event(self, event: TimeEvent) -> None:
+        self.update_market_opening(unix_nanos_to_dt(event.ts_event))
+        _, next_open_time = self.next_market_opening(self.clock.utc_now())
+        self.clock.set_time_alert(
+            name="SwingDetector:market_opening",
+            alert_time=next_open_time,
+            callback=self.on_market_opening_time_event,
+        )
+        open_market_data = OpenMarketData(
+            market=self._current_market.name,
+            min_diff=MARKETS[self._current_market].min_diff,
+            operable=MARKETS[self._current_market].operable,
+            label=f"Market {self._current_market.name} is now open. Operable: {MARKETS[self._current_market].operable}",
+            open_datetime=event.ts_event,
+            close_datetime=dt_to_unix_nanos(next_open_time),
+            ts_init=self.clock.timestamp_ns(),
+            ts_event=self.clock.timestamp_ns(),
+        )
+        self.publish_data(DataType(OpenMarketData), open_market_data)
+
+    def next_market_opening(self, date) -> tuple[Market, pd.Timestamp] | tuple[None, None]:
+        """
+        Returns the next market opening time.
+
+        Returns
+        -------
+        tuple[Market, pd.Timestamp]
+            A tuple containing the next market and its opening time.
+        """
+        result = upcoming([v.hours for v in MARKETS.values()], date)
+        if result:
+            next_open_market, next_open_time = result[0]
+            return Market[next_open_market.name], next_open_time.tz_convert("UTC")
+        return None, None
+
+    def update_market_opening(self, date: datetime) -> None:
+        open_markets = open_now([v.hours for v in MARKETS.values()], date)
+        if open_markets and date > self._next_market_opening:
+            open_market = sorted(
+                open_markets, key=lambda v: v._session_endpoints(date)[0][0].tz_convert("UTC")
+            )[-1]
+            if self._current_market == Market[open_market.name]:
+                return
+
+            next_market, next_open_time = self.next_market_opening(date)
+            self._next_market_opening = next_open_time
+            self.log.info(
+                f"Closed {self._current_market.name if self._current_market else 'N/A'} | Open {open_market.name} | Date {date}",
+                LogColor.CYAN,
+            )
+
+            # change
+            for instrument_id in self.config.instrument_ids or []:
+                if instrument_id not in self._open_market_data:
+                    continue
+                closed_market, data = self._open_market_data[instrument_id]
+                data.active = False
+                self._closed_market_data.setdefault(instrument_id, {})[closed_market] = data
+                closed_market_data = ClosedMarketData(
+                    instrument_id=instrument_id,
+                    market=closed_market.name,
+                    high_price=data.session_high_price,
+                    low_price=data.session_low_price,
+                    operable=data.market_info.operable,
+                    open_datetime=dt_to_unix_nanos(data.open_datetime),
+                    close_datetime=dt_to_unix_nanos(date),
+                    color=MARKETS[closed_market].color,
+                    ts_init=self.clock.timestamp_ns(),
+                    ts_event=self.clock.timestamp_ns(),
+                )
+                self.publish_data(DataType(ClosedMarketData), closed_market_data)
+
+            upcoming_markets = upcoming([v.hours for v in MARKETS.values()], date)
+            upcoming_markets = [(Market[v.name], t.tz_convert("UTC")) for v, t in upcoming_markets]
+            self._upcoming_markets = upcoming_markets
+            self._current_market = Market[open_market.name]
 
     def update_market_data(self, bar: Bar) -> None:
         """
         Actions to be performed when the actor is running and receives a bar.
         """
         current_market = self._current_market
+        if not current_market:
+            return
         if (
             bar.bar_type.instrument_id not in self._open_market_data
             or self._open_market_data[bar.bar_type.instrument_id][0] != current_market

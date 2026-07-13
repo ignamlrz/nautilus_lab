@@ -31,6 +31,7 @@ class MarketHours:
     tz: str
     sessions: tuple[tuple[time, time], ...]
     name: str = ""
+    use_weekends: bool = False
 
     # ----- factories ---------------------------------------------------------
 
@@ -43,11 +44,13 @@ class MarketHours:
         close_h: int,
         close_m: int,
         name: str = "",
+        use_weekends: bool = False,
     ) -> MarketHours:
         return cls(
             tz=tz,
             sessions=((time(open_h, open_m), time(close_h, close_m)),),
             name=name,
+            use_weekends=use_weekends,
         )
 
     @classmethod
@@ -57,6 +60,7 @@ class MarketHours:
         morning: tuple[int, int, int, int],
         afternoon: tuple[int, int, int, int],
         name: str = "",
+        use_weekends: bool = False,
     ) -> MarketHours:
         """Two-session market. Args: ``morning=(oh, om, ch, cm)`` etc."""
         return cls(
@@ -66,6 +70,7 @@ class MarketHours:
                 (time(afternoon[0], afternoon[1]), time(afternoon[2], afternoon[3])),
             ),
             name=name,
+            use_weekends=use_weekends,
         )
 
     # ----- helpers -----------------------------------------------------------
@@ -91,7 +96,7 @@ class MarketHours:
 
     def is_open(self, ts: pd.Timestamp | None = None) -> bool:
         local = self._localize(ts)
-        if local.dayofweek >= 5:  # Sat/Sun
+        if local.dayofweek >= 5 and not self.use_weekends:  # Sat/Sun
             return False
         now = local.time()
         return any(s <= now < e for s, e in self.sessions)
@@ -100,7 +105,7 @@ class MarketHours:
         """Next session start (handles lunch breaks and weekends)."""
         local = self._localize(ts)
         for _ in range(14):  # search up to 2 weeks ahead
-            if local.dayofweek < 5:
+            if local.dayofweek < 5 or self.use_weekends:
                 for s, _ in self.sessions:
                     candidate = local.normalize() + pd.Timedelta(hours=s.hour, minutes=s.minute)
                     if candidate > local:
@@ -111,7 +116,7 @@ class MarketHours:
     def next_close(self, ts: pd.Timestamp | None = None) -> pd.Timestamp:
         """Next session end (current session if open, else next session's end)."""
         local = self._localize(ts)
-        if local.dayofweek < 5:
+        if local.dayofweek < 5 or self.use_weekends:
             for _, end_ts in self._session_endpoints(local):
                 if end_ts > local:
                     return end_ts

@@ -20,7 +20,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
-            "args": ["-c", "${workspaceFolder}/config/system/binance-paper-trading-spot.yaml", "-s", "${workspaceFolder}/config/strategies/swing-detector.yaml"],
+            "args": ["-c", "${workspaceFolder}/config/system/binance-paper-trading-local.yaml", "-s", "${workspaceFolder}/config/strategies/choch-detector.yaml"],
             "justMyCode": false
         }
     ]

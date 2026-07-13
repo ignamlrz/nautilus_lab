@@ -2,6 +2,10 @@ type: backtest
 server:
   enabled: true
   port: 8080
+  drawings:
+    - src.strategies.choch.events:SwingData
+    - src.strategies.choch.events:ClosedMarketData
+    - src.strategies.choch.events:ChangeOfCharacterConfirmationData
 config:
   start: "2026-01-01T14:00:00"
   end: "2026-02-01T14:00:00"
@@ -52,13 +56,13 @@ config:
         data_cls: nautilus_trader.model.data:Bar
         instrument_ids:
           - BTCUSDT-PERP.BINANCE_FUTURES
-          - DOGEUSDT-PERP.BINANCE_FUTURES
+          # - DOGEUSDT-PERP.BINANCE_FUTURES
           - XAGUSDT-PERP.BINANCE_FUTURES
-          - LTCUSDT-PERP.BINANCE_FUTURES
-          - SOLUSDT-PERP.BINANCE_FUTURES
-          - SUIUSDT-PERP.BINANCE_FUTURES
-          - TRXUSDT-PERP.BINANCE_FUTURES
-          - XRPUSDT-PERP.BINANCE_FUTURES
+          # - LTCUSDT-PERP.BINANCE_FUTURES
+          # - SOLUSDT-PERP.BINANCE_FUTURES
+          # - SUIUSDT-PERP.BINANCE_FUTURES
+          # - TRXUSDT-PERP.BINANCE_FUTURES
+          # - XRPUSDT-PERP.BINANCE_FUTURES
         bar_spec: "1-MINUTE-LAST"
         optimize_file_loading: True
     - config_path: nautilus_trader.backtest.config:BacktestDataConfig
@@ -67,11 +71,11 @@ config:
         data_cls: nautilus_trader.model.data:FundingRateUpdate
         instrument_ids:
           - BTCUSDT-PERP.BINANCE_FUTURES
-          - DOGEUSDT-PERP.BINANCE_FUTURES
+          # - DOGEUSDT-PERP.BINANCE_FUTURES
           - XAGUSDT-PERP.BINANCE_FUTURES
-          - LTCUSDT-PERP.BINANCE_FUTURES
-          - SOLUSDT-PERP.BINANCE_FUTURES
-          - SUIUSDT-PERP.BINANCE_FUTURES
-          - TRXUSDT-PERP.BINANCE_FUTURES
-          - XRPUSDT-PERP.BINANCE_FUTURES
+          # - LTCUSDT-PERP.BINANCE_FUTURES
+          # - SOLUSDT-PERP.BINANCE_FUTURES
+          # - SUIUSDT-PERP.BINANCE_FUTURES
+          # - TRXUSDT-PERP.BINANCE_FUTURES
+          # - XRPUSDT-PERP.BINANCE_FUTURES
         optimize_file_loading: True

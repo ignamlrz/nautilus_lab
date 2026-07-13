@@ -11,7 +11,12 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.config import ActorConfig
+from nautilus_trader.config import resolve_path
 from nautilus_trader.model import BarSpecification
+from nautilus_trader.model.data import DataType
+from nautilus_trader.model.identifiers import InstrumentId
+
+from src.api.models.drawings import Drawing
 
 from .server import Server
 
@@ -20,6 +25,7 @@ class ServerAgentActorConfig(ActorConfig):
     enabled: bool = True
     port: int = 8080
     host: str = ""
+    drawings: list[str] = []
 
 
 TRADINGVIEW_BAR_SPEC_MAP = {
@@ -41,15 +47,38 @@ class ServerAgentActor(Actor):
     def __init__(self, config: ServerAgentActorConfig):
         super().__init__(config)
         self.server = Server(config)
+        self.drawings: dict[InstrumentId, list[Drawing]] = {}
 
     def on_start(self):
         self.log.info("Starting the server.")
         self.server.start()
+        for d in self.config.drawings:
+            self.log.info(f"Registering drawing data: {d}")
+            data = resolve_path(d)
+            self.subscribe_data(DataType(data))
 
     def on_stop(self):
         """Stop the API server and remove the actor from the app."""
         if not isinstance(self.clock, LiveClock):
             self.log.info("Press Enter to stop...", color=LogColor.YELLOW)
             input()
+        for d in self.config.drawings:
+            self.log.info(f"Unregistering drawing data: {d}")
+            data = resolve_path(d)
+            self.unsubscribe_data(DataType(data))
         self.log.info("Stopping the server.")
         self.server.stop()
+
+    def on_data(self, data):
+        """Handle incoming data events."""
+        if hasattr(data, "to_drawings"):
+            drawings: list[Drawing] = data.to_drawings()
+            for drawing in drawings:
+                self.drawings.setdefault(InstrumentId.from_str(drawing.instrument_id), []).append(
+                    drawing
+                )
+        elif hasattr(data, "to_drawing"):
+            drawing: Drawing = data.to_drawing()
+            self.drawings.setdefault(InstrumentId.from_str(drawing.instrument_id), []).append(
+                drawing
+            )

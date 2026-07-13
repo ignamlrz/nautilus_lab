@@ -12,8 +12,9 @@ class BosEvent(Enum):
 
 @unique
 class Market(Enum):
-    SSE_SZSE = "SSE/SZSE"
-    LSE = "LSE"
-    PRE_NYSE = "PRE_NYSE"
-    NYSE = "NYSE"
-    POST_NYSE = "POST_NYSE"
+    NONE = "NONE"
+    ASIA = "ASIA"
+    LONDON = "LONDON"
+    EEUU_PRE = "EEUU:PREMARKET"
+    EEUU = "EEUU"
+    EEUU_POST = "EEUU:POSTMARKET"

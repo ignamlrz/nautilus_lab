@@ -17,7 +17,7 @@ class MarketRouter(BaseRouter):
         Returns a list of bars for a given symbol and interval.
         """
         bar_spec = self.timeframe_to_bar_spec(request.query.get("interval", "1m"))
-        instrument_id = InstrumentId.from_str(request.query["symbol"])
+        instrument_id = InstrumentId.from_str(request.query["id"])
         before = int(request.query.get("before", self.clock.timestamp_ms())) * 10**6
         limit = int(request.query.get("limit", 500))
 
@@ -40,9 +40,12 @@ class MarketRouter(BaseRouter):
         tickers = []
         for symbol in symbols:
             instrument_id = InstrumentId.from_str(symbol.upper())
-            ticker = self._calculate_24hr_ticker(instrument_id)
-            if ticker:
-                tickers.append(ticker)
+            try:
+                ticker = self._calculate_24hr_ticker(instrument_id)
+                if ticker:
+                    tickers.append(ticker)
+            except Exception:
+                pass
         if unique_symbol and tickers:
             return web.json_response(tickers[0].model_dump())
         return web.json_response([t.model_dump() for t in tickers])
