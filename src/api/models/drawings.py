@@ -1,14 +1,14 @@
-from enum import Enum
+from enum import StrEnum
 from enum import unique
 
 from pydantic import BaseModel
 
 
 @unique
-class DrawingTool(Enum):
+class DrawingTool(StrEnum):
     """Enum for Drawing types."""
 
-    LINE = "line"
+    LINE = "TrendLine"
     VLINE = "VerticalLine"
     HLINE = "HorizontalLine"
     RECTANGLE = "Rectangle"

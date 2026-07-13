@@ -138,7 +138,7 @@ MARKETS = {
     ),
     Market.LONDON: MarketInfo(
         hours=MarketHours.continuous(
-            "Europe/London", 8, 0, 15, 0, name=Market.LONDON.name, use_weekends=True
+            "Europe/London", 8, 0, 14, 0, name=Market.LONDON.name, use_weekends=True
         ),
         min_diff=0.002,
         operable=True,
@@ -147,7 +147,7 @@ MARKETS = {
     ),
     Market.EEUU_PRE: MarketInfo(
         hours=MarketHours.continuous(
-            "America/New_York", 8, 0, 9, 30, name=Market.EEUU_PRE.name, use_weekends=True
+            "America/New_York", 8, 30, 9, 30, name=Market.EEUU_PRE.name, use_weekends=True
         ),
         min_diff=0.002,
         operable=False,
@@ -292,7 +292,7 @@ class SwingDetector(Actor):
                 return
 
             # rebased above this market
-            if market_data.session_high_duration < 30 and swing.direction == -1:
+            if market_data.session_high_duration < swing.period and swing.direction == -1:
                 if rebased_above_this_market:
                     market_rebased_data.break_above_triggered = True
                     text = f"Swings confirmed on 1m: ⬇️ (#{swing.duration} bars) | {market.name} breaks above {market_rebased.name} | Diff: [{diff_perp:.2%}]"
@@ -301,7 +301,8 @@ class SwingDetector(Actor):
                 else:
                     return
                 for md in market_data.markets_breaked_above:
-                    if md.session_high_price > swing.low_price:
+                    # if md.session_high_price > swing.low_price:
+                    if rebased_above_this_market:
                         if self.config.log_data:
                             self.log.info(text, LogColor.RED)
                         swing_data = SwingData(
@@ -319,7 +320,7 @@ class SwingDetector(Actor):
                         self.publish_data(DataType(SwingData), swing_data)
                         break
             # rebased below this market
-            if market_data.session_low_duration < 30 and swing.direction == 1:
+            if market_data.session_low_duration < swing.period and swing.direction == 1:
                 if rebased_below_this_market:
                     market_rebased_data.break_below_triggered = True
                     text = f"Swings confirmed on 1m: ⬆️ (#{swing.duration} bars) | {market.name} breaks below {market_rebased.name} | Diff: [{diff_perp:.2%}]"
@@ -328,7 +329,8 @@ class SwingDetector(Actor):
                 else:
                     return
                 for md in market_data.markets_breaked_below:
-                    if md.session_low_price < swing.high_price:
+                    # if md.session_low_price < swing.high_price:
+                    if rebased_below_this_market:
                         if self.config.log_data:
                             self.log.info(text, LogColor.GREEN)
                         swing_data = SwingData(

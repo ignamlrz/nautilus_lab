@@ -68,7 +68,48 @@ class ClosedMarketData(Data):
             instrument_id=str(self.instrument_id),
             tool=DrawingTool.RECTANGLE,
             points=[DrawingPoint(**p) for p in points],
-            style=DrawingStyle(color=self.color, fill=f"{self.color}11"),
+            style=DrawingStyle(color="#00000000", fill=f"{self.color}11"),
+        )
+
+
+@customdataclass
+class BosLine(Data):
+    instrument_id: InstrumentId
+    open_datetime: int
+    close_datetime: int
+    price: float
+    color: str = "#3051E2"
+
+    def to_drawing(self) -> Drawing:
+        points = [
+            {"time": self.open_datetime // 10**9, "price": self.price},
+            {"time": self.close_datetime // 10**9, "price": self.price},
+        ]
+        return Drawing(
+            id=str(UUID4()),
+            instrument_id=str(self.instrument_id),
+            tool=DrawingTool.LINE,
+            points=[DrawingPoint(**p) for p in points],
+            style=DrawingStyle(color=self.color, width=1, dashed=True),
+        )
+
+
+@customdataclass
+class BosVLine(Data):
+    instrument_id: InstrumentId
+    datetime: int
+    color: str = "#3051E2"
+
+    def to_drawing(self) -> Drawing:
+        points = [
+            {"time": self.datetime // 10**9, "price": 0},
+        ]
+        return Drawing(
+            id=str(UUID4()),
+            instrument_id=str(self.instrument_id),
+            tool=DrawingTool.VLINE,
+            points=[DrawingPoint(**p) for p in points],
+            style=DrawingStyle(color=self.color, width=1),
         )
 
 

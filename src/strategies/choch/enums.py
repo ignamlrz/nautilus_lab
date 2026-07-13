@@ -5,9 +5,9 @@ from enum import unique
 @unique
 class BosEvent(Enum):
     NONE = 1
-    MSS_DETECTED = 2
-    BOS_DETECTED = 3
-    CHOCH_DETECTED = 4
+    MSS = 2
+    BOS = 3
+    CHOCH = 4
 
 
 @unique

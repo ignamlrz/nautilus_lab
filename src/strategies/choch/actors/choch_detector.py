@@ -91,9 +91,9 @@ class BreakOfStructureData:
                 if self.mss is None:
                     self.mss = self.bos
                     self.mss_duration = self.bos_duration
-                    event = BosEvent.MSS_DETECTED
+                    event = BosEvent.MSS
                 else:
-                    event = BosEvent.BOS_DETECTED if self.bos_duration > 0 else BosEvent.NONE
+                    event = BosEvent.BOS if self.bos_duration > 0 else BosEvent.NONE
                 self.__restore(high, low)
             else:
                 self.high_price = high
@@ -101,7 +101,7 @@ class BreakOfStructureData:
             return event
         elif bar.close < self.choc and not self.choc_triggered:
             self.choc_triggered = True
-            return BosEvent.CHOCH_DETECTED
+            return BosEvent.CHOCH
         else:
             if low < self.low_price:
                 self.low_price = low
@@ -124,9 +124,9 @@ class BreakOfStructureData:
                 if self.mss is None:
                     self.mss = self.bos
                     self.mss_duration = self.bos_duration
-                    event = BosEvent.MSS_DETECTED
+                    event = BosEvent.MSS
                 else:
-                    event = BosEvent.BOS_DETECTED if self.bos_duration > 0 else BosEvent.NONE
+                    event = BosEvent.BOS if self.bos_duration > 0 else BosEvent.NONE
                 self.__restore(high, low)
             else:
                 self.low_price = low
@@ -134,7 +134,7 @@ class BreakOfStructureData:
             return event
         elif bar.close > self.choc and not self.choc_triggered:
             self.choc_triggered = True
-            return BosEvent.CHOCH_DETECTED
+            return BosEvent.CHOCH
         else:
             if high > self.high_price:
                 self.high_price = high
@@ -266,17 +266,17 @@ class ChangeOfCharacterDetector(Actor):
         bos = self._bos.get(instrument_id)
         bos_event = bos.handle_bar(bar)
 
-        if bos_event == BosEvent.CHOCH_DETECTED:
+        if bos_event == BosEvent.CHOCH:
             self.on_choch_detected(bar)
         elif instrument_id in self._temp_choch_bos:
-            if bos_event in [BosEvent.BOS_DETECTED, BosEvent.MSS_DETECTED]:
+            if bos_event in [BosEvent.BOS, BosEvent.MSS]:
                 self._temp_choch_bos.pop(instrument_id)
                 bos.choc_triggered = False
             else:
                 temp_choch_bos = self._temp_choch_bos[instrument_id]
                 temp_choch_bos_event = temp_choch_bos.handle_bar(bar)
 
-                if temp_choch_bos_event == BosEvent.MSS_DETECTED:
+                if temp_choch_bos_event == BosEvent.MSS:
                     self._bos[instrument_id] = temp_choch_bos
                     self._temp_choch_bos.pop(instrument_id)
                     temp_choch_bos.choc_triggered = False
@@ -350,7 +350,7 @@ class ChangeOfCharacterDetector(Actor):
         for i in range(duration, -1, -1):
             bar = self.cache.bar(bar_type=bar_type, index=i)
             event_1 = bos_1.handle_bar(bar)
-            if event_1 == BosEvent.CHOCH_DETECTED:
+            if event_1 == BosEvent.CHOCH:
                 bos_2 = BreakOfStructureData.empty(
                     bar_type=bar_type,
                     period=self.config.bos_period,
@@ -358,12 +358,12 @@ class ChangeOfCharacterDetector(Actor):
                 )
                 bos_2.handle_bar(bar)
             elif bos_2 is not None:
-                if event_1 in [BosEvent.BOS_DETECTED, BosEvent.MSS_DETECTED]:
+                if event_1 in [BosEvent.BOS, BosEvent.MSS]:
                     bos_1.choc_triggered = False
                     bos_2 = None
                 else:
                     event_2 = bos_2.handle_bar(bar)
-                    if event_2 == BosEvent.MSS_DETECTED:
+                    if event_2 == BosEvent.MSS:
                         bos_1 = bos_2
                         bos_2 = None
                         bos_1.choc_triggered = False
