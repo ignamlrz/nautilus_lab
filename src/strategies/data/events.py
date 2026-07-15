@@ -55,6 +55,8 @@ class ClosedMarketData(Data):
 class MarketBreakAboveData(Data):
     instrument_id: InstrumentId
     market: str
+    session_high_price: float
+    session_low_price: float
     markets_rebased_on_session: str
     price_market_rebased: float
     ts_market_rebased: int
@@ -64,6 +66,8 @@ class MarketBreakAboveData(Data):
 class MarketBreakBelowData(Data):
     instrument_id: InstrumentId
     market: str
+    session_high_price: float
+    session_low_price: float
     markets_rebased_on_session: str
     price_market_rebased: float
     ts_market_rebased: int
@@ -86,5 +90,6 @@ class NewSessionLowData(Data):
 @customdataclass
 class TelegramTextData(Data):
     instrument_id: InstrumentId
+    type: str
     label: str
     text: str

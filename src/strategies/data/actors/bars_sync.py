@@ -21,7 +21,8 @@ class BarSyncronizerActorConfig(ActorConfig, frozen=True):
     instrument_ids: list[InstrumentId]
     bar_type_specs: list[str]
 
-    historical_data_timedelta: pd.Timedelta = pd.Timedelta(days=1)
+    historical_data_timedelta: pd.Timedelta | None = None
+    historical_data_num_bars: int = 1000
     client_id: ClientId | None = None
     log_data: bool = False
 
@@ -38,7 +39,6 @@ class BarSyncronizerActor(Actor):
 
     def on_start(self) -> None:
         client_id = self.config.client_id
-        requests_start = self.clock.utc_now() - self.config.historical_data_timedelta
 
         for bar_type_spec in self.config.bar_type_specs:
             if "INTERNAL" in bar_type_spec:
@@ -51,7 +51,7 @@ class BarSyncronizerActor(Actor):
                 self._pending_requests_bars[uuid] = list(aggregated_bar_types)
                 self.request_aggregated_bars(
                     bar_types=list(aggregated_bar_types),
-                    start=requests_start,
+                    start=self._calc_request_start(bar_type),
                     client_id=client_id,
                     update_subscriptions=True,
                     callback=self.on_requests_bars_finished,
@@ -65,7 +65,7 @@ class BarSyncronizerActor(Actor):
                     self._pending_requests_bars[uuid] = [bar_type]
                     self.request_bars(
                         bar_type=bar_type,
-                        start=requests_start,
+                        start=self._calc_request_start(bar_type),
                         client_id=client_id,
                         callback=self.on_requests_bars_finished,
                         request_id=uuid,
@@ -88,7 +88,11 @@ class BarSyncronizerActor(Actor):
                 self.unsubscribe_bars(bar_type=bar_type, client_id=client_id)
 
     def on_historical_data(self, data):
-        self._map_on_historical_data.get(type(data), lambda x: None)(data)
+        for cls in type(data).__mro__:
+            handler = self._map_on_historical_data.get(cls)
+            if handler:
+                handler(data)
+                return
 
     def on_historical_bar(self, bar: Bar) -> None:
         data = HistoricalBarData(instrument_id=bar.bar_type.instrument_id, bar_type=bar.bar_type)
@@ -97,3 +101,11 @@ class BarSyncronizerActor(Actor):
     def on_bar(self, bar: Bar) -> None:
         data = LiveBarData(instrument_id=bar.bar_type.instrument_id, bar_type=bar.bar_type)
         self.publish_data(DataType(LiveBarData), data)
+
+    def _calc_request_start(self, bar_type: BarType) -> pd.Timestamp:
+        if self.config.historical_data_timedelta is not None:
+            return self.clock.utc_now() - self.config.historical_data_timedelta
+        else:
+            return self.clock.utc_now() - (
+                bar_type.spec.timedelta * self.config.historical_data_num_bars
+            )

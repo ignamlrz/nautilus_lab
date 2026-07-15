@@ -19,6 +19,7 @@ ALLOWED_TIMEFRAME_TO_BAR_SPEC = {
     "1m": BarSpecification.from_str("1-MINUTE-LAST"),
     "5m": BarSpecification.from_str("5-MINUTE-LAST"),
     "15m": BarSpecification.from_str("15-MINUTE-LAST"),
+    "30m": BarSpecification.from_str("30-MINUTE-LAST"),
     "1h": BarSpecification.from_str("1-HOUR-LAST"),
     "4h": BarSpecification.from_str("4-HOUR-LAST"),
     "1d": BarSpecification.from_str("1-DAY-LAST"),

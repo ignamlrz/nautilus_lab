@@ -1,13 +1,20 @@
-strategies: []
-  # - strategy_path: src.strategies.choch.strategy:ChangeOfCharacterStrategy
-  #   config_path: src.strategies.choch.strategy:ChangeOfCharacterStrategyConfig
-  #   config:
-  #     log_commands: True
-  #     log_events: False
+strategies:
+  - strategy_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategy
+    config_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategyConfig
+    config:
+      client_id: swing-reversal-strategy
+      bar_type_timedelta: 1m
+      log_commands: False
+      log_events: False
 actors:
   - actor_path: src.strategies.data.actors.markets:MarketsActor
     config_path: src.strategies.data.actors.markets:MarketsActorConfig
     config:
+      client_id: markets-actor
+      bar_type_historical: 30-MINUTE-LAST-INTERNAL
+      bar_type_live: 5-MINUTE-LAST-INTERNAL
+      markets_data_history: 100
+      use_wicks: True
       markets:
         ASIA:
           tz: Asia/Hong_Kong
@@ -34,8 +41,6 @@ actors:
           open_time_hour: 16
           open_time_minute: 0
           color: "#CA6F1E"
-      bar_type_historical: 30-MINUTE-LAST-INTERNAL
-      bar_type_live: 1-MINUTE-LAST-EXTERNAL
       blackout_window:
         start_weekday: 4
         start_hour: 16
@@ -46,9 +51,11 @@ actors:
   - actor_path: src.strategies.data.actors.bars_sync:BarSyncronizerActor
     config_path: src.strategies.data.actors.bars_sync:BarSyncronizerActorConfig
     config:
+      client_id: bars-sync-actor
       bar_type_specs:
         - 1-MINUTE-LAST-EXTERNAL
-        - 30-MINUTE-LAST-EXTERNAL
+        - 5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL
+        - 30-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL
       instrument_ids:
         # crypto
         - BTCUSDT-PERP.BINANCE_FUTURES
@@ -60,34 +67,5 @@ actors:
   - actor_path: src.strategies.data.actors.telegram:TelegramActor
     config_path: src.strategies.data.actors.telegram:TelegramActorConfig
     config:
-      bot_token: ${TELEGRAM_BOT_TOKEN}
-      chat_ids: ${TELEGRAM_CHAT_ID}
+      client_id: telegram-actor
       log_data: True
-  # - actor_path: src.strategies.choch.actors.swing_detector:SwingDetector
-  #   config_path: src.strategies.choch.actors.swing_detector:SwingDetectorConfig
-  #   config:
-  #     log_data: True
-  #     period: 30
-  #     use_wicks: True
-  #     instrument_ids:
-  #       # crypto
-  #       - BTCUSDT-PERP.BINANCE_FUTURES
-  #       # - DOGEUSDT-PERP.BINANCE_FUTURES
-  #       - XAGUSDT-PERP.BINANCE_FUTURES
-  #       # - TSLAUSDT-PERP.BINANCE_FUTURES
-  #       # - LTCUSDT-PERP.BINANCE_FUTURES
-  #       # - SOLUSDT-PERP.BINANCE_FUTURES
-  #       # - SUIUSDT-PERP.BINANCE_FUTURES
-  #       # - TRXUSDT-PERP.BINANCE_FUTURES
-  #       # - XRPUSDT-PERP.BINANCE_FUTURES
-  # - actor_path: src.strategies.choch.actors.choch_detector_v2:ChangeOfCharacterDetectorV2
-  #   config_path: src.strategies.choch.actors.choch_detector_v2:ChangeOfCharacterDetectorV2Config
-  #   config:
-  #     log_data: True
-  #     bar_type_spec: 1-MINUTE-LAST-EXTERNAL
-  #     instrument_ids:
-  #       # crypto
-  #       - BTCUSDT-PERP.BINANCE_FUTURES
-  #       # - DOGEUSDT-PERP.BINANCE_FUTURES
-  #       # - XAGUSDT-PERP.BINANCE_FUTURES
-  #       - XAGUSDT-PERP.BINANCE_FUTURES

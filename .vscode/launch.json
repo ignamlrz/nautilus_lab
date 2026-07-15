@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
-            "args": ["-c", "${workspaceFolder}/config/system/backtest.yaml", "-s", "${workspaceFolder}/config/strategies/choch-detector.yaml"],
+            "args": ["-c", "${workspaceFolder}/config/system/backtest.yaml", "-s", "${workspaceFolder}/config/strategies/swing-reversal-strategy.yaml"],
             "justMyCode": false
         },
         {
@@ -20,7 +20,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal",
-            "args": ["-c", "${workspaceFolder}/config/system/binance-paper-trading-local.yaml", "-s", "${workspaceFolder}/config/strategies/choch-detector.yaml"],
+            "args": ["-c", "${workspaceFolder}/config/system/binance-paper-trading-local.yaml", "-s", "${workspaceFolder}/config/strategies/swing-reversal-strategy-live.yaml"],
             "justMyCode": false
         }
     ]

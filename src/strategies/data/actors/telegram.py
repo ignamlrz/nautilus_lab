@@ -1,7 +1,9 @@
+import pandas as pd
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.config import ActorConfig
 from nautilus_trader.common.enums import LogColor
+from nautilus_trader.core.datetime import unix_nanos_to_dt
 from nautilus_trader.model.data import DataType
 from nautilus_trader.model.identifiers import ClientId
 
@@ -16,10 +18,10 @@ class TelegramActorConfig(ActorConfig, frozen=True):
     Configuration for ``TelegramActor`` instances.
     """
 
-    client_id: ClientId
     use_env: bool = True
     bot_token: str | None = None
     chat_ids: str | None = None
+    client_id: ClientId | None = None
     log_data: bool = True
 
 
@@ -32,9 +34,12 @@ class TelegramActor(Actor):
             TelegramTextData: self.on_telegram_text_data,
         }
         self._telegram: SyncTelegramBridge | None = None
+        self._date_started: pd.Timestamp | None = None
 
     def on_start(self) -> None:
         client_id = self.config.client_id
+
+        self._date_started = self.clock.utc_now()
 
         # Initialize the telegram bridge if running in live mode
         if isinstance(self.clock, LiveClock):
@@ -63,7 +68,7 @@ class TelegramActor(Actor):
 
     def on_telegram_text_data(self, data: TelegramTextData) -> None:
         emoji = ""
-        match data.label:
+        match data.type:
             case s if "BUY" in s:
                 emoji = "🟢"
             case s if "SELL" in s:
@@ -72,10 +77,12 @@ class TelegramActor(Actor):
                 emoji = "ℹ️"
             case s if "WARNING" in s:
                 emoji = "⚠️"
-        if not self._telegram and self.config.log_data:
-            self.log.info(
-                f"{data.instrument_id} -> Label: {data.label} | Text: {data.text}", LogColor.YELLOW
-            )
-        else:
+        if not self._telegram:
+            if self.config.log_data:
+                self.log.info(
+                    f"{data.instrument_id} -> Label: {data.label} | Text: {data.text}",
+                    LogColor.YELLOW,
+                )
+        elif unix_nanos_to_dt(data.ts_event) > self._date_started:
             text_telegram = f"<code>{data.instrument_id.venue}:{data.instrument_id.symbol}</code>\n{emoji} <b>{data.label}</b>\n\n{data.text}"
             self._telegram.send(text_telegram)

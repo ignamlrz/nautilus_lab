@@ -1,0 +1,85 @@
+strategies:
+  - strategy_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategy
+    config_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategyConfig
+    config:
+      bar_type_timedelta: 1m
+      log_commands: False
+      log_events: False
+actors:
+  - actor_path: src.strategies.data.actors.markets:MarketsActor
+    config_path: src.strategies.data.actors.markets:MarketsActorConfig
+    config:
+      bar_type_historical: 30-MINUTE-LAST-EXTERNAL
+      bar_type_live: 1-MINUTE-LAST-EXTERNAL
+      markets_data_history: 100
+      use_wicks: True
+      markets:
+        ASIA:
+          tz: Asia/Hong_Kong
+          open_time_hour: 8
+          open_time_minute: 30
+          color: "#6C5CE7"
+        LONDON:
+          tz: Europe/London
+          open_time_hour: 8
+          open_time_minute: 0
+          color: "#3498DB"
+        NY/PRE:
+          tz: America/New_York
+          open_time_hour: 8
+          open_time_minute: 30
+          color: "#F8C471"
+        NY:
+          tz: America/New_York
+          open_time_hour: 9
+          open_time_minute: 30
+          color: "#F39C12"
+        NY/POST:
+          tz: America/New_York
+          open_time_hour: 16
+          open_time_minute: 0
+          color: "#CA6F1E"
+      blackout_window:
+        start_weekday: 4
+        start_hour: 16
+        start_minute: 0
+        end_weekday: 6
+        end_hour: 16
+        end_minute: 0
+  - actor_path: src.strategies.data.actors.bars_sync:BarSyncronizerActor
+    config_path: src.strategies.data.actors.bars_sync:BarSyncronizerActorConfig
+    config:
+      bar_type_specs:
+        - 1-MINUTE-LAST-EXTERNAL
+        - 30-MINUTE-LAST-EXTERNAL
+      instrument_ids:
+        # crypto
+        - BTCUSDT-PERP.BINANCE_FUTURES
+        - ETHUSDT-PERP.BINANCE_FUTURES
+        - XRPUSDT-PERP.BINANCE_FUTURES
+        - SOLUSDT-PERP.BINANCE_FUTURES
+        - BNBUSDT-PERP.BINANCE_FUTURES
+        - DOGEUSDT-PERP.BINANCE_FUTURES
+        - HYPEUSDT-PERP.BINANCE_FUTURES
+        - XLMUSDT-PERP.BINANCE_FUTURES
+        # metales
+        - XAUUSDT-PERP.BINANCE_FUTURES
+        - XAGUSDT-PERP.BINANCE_FUTURES
+        - XPTUSDT-PERP.BINANCE_FUTURES
+        - BZUSDT-PERP.BINANCE_FUTURES
+        - NATGASUSDT-PERP.BINANCE_FUTURES
+        # acciones
+        - NVDAUSDT-PERP.BINANCE_FUTURES
+        - MSFTUSDT-PERP.BINANCE_FUTURES
+        - AAPLUSDT-PERP.BINANCE_FUTURES
+        - GOOGLUSDT-PERP.BINANCE_FUTURES
+        - METAUSDT-PERP.BINANCE_FUTURES
+        - AMZNUSDT-PERP.BINANCE_FUTURES
+        - TSLAUSDT-PERP.BINANCE_FUTURES
+        - SPCXUSDT-PERP.BINANCE_FUTURES
+      historical_data_num_bars: 1000
+      log_data: False
+  - actor_path: src.strategies.data.actors.telegram:TelegramActor
+    config_path: src.strategies.data.actors.telegram:TelegramActorConfig
+    config:
+      log_data: True

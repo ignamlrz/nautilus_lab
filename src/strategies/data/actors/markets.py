@@ -91,14 +91,16 @@ class MarketsActorConfig(ActorConfig, frozen=True):
     """
 
     markets: dict[str, MarketInfoActorConfig]
+    bar_type_historical: str
+    bar_type_live: str
     blackout_window: MarketBlackoutWindowConfig | None = None
-    use_wicks: bool = True
     markets_data_history: PositiveInt = 10
+    use_wicks: bool = True
     client_id: ClientId | None = None
     log_session_changed: bool = False
     log_session_high_low: bool = False
-    log_break_above_below: bool = True
-    log_broken_both_above_below: bool = True
+    log_break_above_below: bool = False
+    log_broken_both_above_below: bool = False
 
 
 @dataclass
@@ -214,6 +216,9 @@ class MarketsActor(Actor):
         self._map_on_data.get(type(data), lambda x: None)(data)
 
     def on_historical_bar(self, data: HistoricalBarData) -> None:
+        if self.config.bar_type_historical not in str(data.bar_type):
+            return
+
         if data.instrument_id not in self._markets_data_history:
             self._next_epoch_recalculate_market[data.instrument_id] = 0
             self._current_market[data.instrument_id] = None
@@ -225,6 +230,8 @@ class MarketsActor(Actor):
         self._process_bar(bar)
 
     def on_bar(self, data: LiveBarData) -> None:
+        if self.config.bar_type_live not in str(data.bar_type):
+            return
         if data.instrument_id not in self._markets_data_history:
             self._next_epoch_recalculate_market[data.instrument_id] = 0
             self._current_market[data.instrument_id] = None
@@ -275,7 +282,9 @@ class MarketsActor(Actor):
             self._markets_open[instrument_id] = markets_open
             self._next_epoch_recalculate_market[instrument_id] = list(markets_open.keys())[-2]
 
-        current_market = self._find_current_market(self._markets_open[instrument_id], bar.ts_event)
+        ts_open, current_market = self._find_current_market(
+            self._markets_open[instrument_id], bar.ts_event
+        )
         if current_market != self._current_market[instrument_id]:
             # current_market changed, create new market
             self._current_market[instrument_id] = current_market
@@ -284,11 +293,11 @@ class MarketsActor(Actor):
                     f"{instrument_id} -> Current market changed to: {self._current_market[instrument_id]} @ {unix_nanos_to_dt(bar.ts_event)}"
                 )
             next_market_epoch = self._find_next_market_epoch(
-                self._markets_open[instrument_id], bar.ts_event
+                self._markets_open[instrument_id], ts_open
             )
             market_data = MarketData.create(
                 market=current_market,
-                open_datetime=unix_nanos_to_dt(bar.ts_event),
+                open_datetime=unix_nanos_to_dt(ts_open),
                 close_datetime=unix_nanos_to_dt(next_market_epoch) if next_market_epoch else None,
                 use_wicks=self.config.use_wicks,
                 active=False,
@@ -348,7 +357,8 @@ class MarketsActor(Actor):
         i = bisect_left(keys, timestamp)
         if i == 0:
             return None
-        return markets_open[keys[i - 1]]
+        ts_open = keys[i - 1]
+        return ts_open, markets_open[ts_open]
 
     def _find_next_market_epoch(
         self, markets_open: OrderedDict[int, str], timestamp: int
@@ -391,11 +401,13 @@ class MarketsActor(Actor):
         data = MarketBreakAboveData(
             instrument_id=instrument_id,
             market=market_data.name,
+            session_high_price=market_data.session_high_price,
+            session_low_price=market_data.session_low_price,
             markets_rebased_on_session=",".join(
                 [m.name for m in market_data.markets_breaked_above]
             ),
             price_market_rebased=closed_market_data.session_high_price,
-            ts_market_rebased=closed_market_data.break_above_datetime,
+            ts_market_rebased=dt_to_unix_nanos(closed_market_data.open_datetime),
             ts_init=dt_to_unix_nanos(market_data.open_datetime),
             ts_event=dt_to_unix_nanos(market_data.session_high_datetime),
         )
@@ -411,11 +423,13 @@ class MarketsActor(Actor):
         data = MarketBreakBelowData(
             instrument_id=instrument_id,
             market=market_data.name,
+            session_high_price=market_data.session_high_price,
+            session_low_price=market_data.session_low_price,
             markets_rebased_on_session=",".join(
                 [m.name for m in market_data.markets_breaked_below]
             ),
             price_market_rebased=closed_market_data.session_low_price,
-            ts_market_rebased=closed_market_data.break_below_datetime,
+            ts_market_rebased=dt_to_unix_nanos(closed_market_data.open_datetime),
             ts_init=dt_to_unix_nanos(market_data.open_datetime),
             ts_event=dt_to_unix_nanos(market_data.session_low_datetime),
         )
