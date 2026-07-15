@@ -5,7 +5,10 @@ server:
   drawings:
     - src.strategies.choch.events:SwingData
     - src.strategies.choch.events:ClosedMarketData
-    - src.strategies.choch.events:ChangeOfCharacterConfirmationData
+    - src.strategies.choch.events:BosLine
+    - src.strategies.choch.events:ChocLine
+    - src.strategies.choch.events:BosWithoutMssPattern
+    - src.strategies.choch.events:BosPerfectPattern
 config:
   trader_id: TESTER-0001
   # data clients config

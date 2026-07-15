@@ -17,7 +17,9 @@ from nautilus_trader.model.identifiers import InstrumentId
 from src.helpers.bar import maxmin_price
 from src.strategies.choch.enums import BosEvent
 from src.strategies.choch.events import BosLine
-from src.strategies.choch.events import BosVLine
+from src.strategies.choch.events import BosPerfectPattern
+from src.strategies.choch.events import BosWithoutMssPattern
+from src.strategies.choch.events import ChocLine
 
 
 @dataclass
@@ -147,12 +149,14 @@ class BosIndicator:
                 self.globex_l = bar.close
                 self.globex_h_duration = -1  # start on next candle
                 self.globex_l_duration = -1  # start on next candle
+                self._exists_empty_price_before_bos = False
             else:
                 # restart
                 self.globex_h = high
                 self.globex_h_duration = 0
                 self.globex_l = math.inf
                 self.globex_l_duration = 0
+                self._exists_empty_price_before_bos = False
                 self._bars.clear()
                 self._bars.appendleft(bar)
         # Check if the bar closes below the choc level, indicating a potential CHoC
@@ -199,12 +203,14 @@ class BosIndicator:
                 self.globex_l = bar.close
                 self.globex_h_duration = -1  # start on next candle
                 self.globex_l_duration = -1  # start on next candle
+                self._exists_empty_price_before_bos = False
             else:
                 # restart
                 self.globex_h = -math.inf
                 self.globex_h_duration = 0
                 self.globex_l = low
                 self.globex_l_duration = 0
+                self._exists_empty_price_before_bos = False
                 self._bars.clear()
                 self._bars.appendleft(bar)
         # Check if the bar closes above the choc level, indicating a potential CHoC
@@ -229,72 +235,6 @@ class BosIndicator:
             if high > self.globex_h:
                 self.globex_h = high
                 self.globex_h_duration = -1
-
-
-# @dataclass
-# class BosIndicator:
-#     # config
-#     bar_type: BarType
-#     period: PositiveInt
-#     main_side: OrderSide
-#     use_wicks: bool = False
-#     # boss info
-#     bos_positive: BosIndicator | None = None
-#     bos_negative: BosIndicator | None = None
-#     # choch
-#     choc_triggered: bool = False
-#     # markets
-#     market_without_update: int = 0
-#     # conditions
-#     recently_created_bos: bool = False
-#     exists_empty_price_on_bos: bool = False
-
-#     def handle_bar(self, bar: Bar) -> None:
-#         if self.main_side == OrderSide.NO_ORDER_SIDE:
-#             if bar.open < bar.close:
-#                 self.main_side = OrderSide.BUY
-#                 self.bos_positive = BosIndicator.create(
-#                     period=self.period, bar=bar, use_wicks=self.use_wicks
-#                 )
-#             else:
-#                 self.main_side = OrderSide.SELL
-#                 self.bos_negative = BosIndicator.create(
-#                     period=self.period, bar=bar, use_wicks=self.use_wicks
-#                 )
-#         secondary_event = BosEvent.NONE
-#         if self.main_side == OrderSide.BUY:
-#             main_event = self.bos_positive.handle_bar(bar)
-#             if self.bos_negative is None and bar.open > bar.close:
-#                 self.bos_negative = BosIndicator.create(
-#                     period=self.period, bar=bar, use_wicks=self.use_wicks
-#                 )
-#             if self.bos_negative:
-#                 secondary_event = self.bos_negative.handle_bar(bar)
-#         elif self.main_side == OrderSide.SELL:
-#             main_event = self.bos_negative.handle_bar(bar)
-#             if self.bos_positive is None and bar.open < bar.close:
-#                 self.bos_positive = BosIndicator.create(
-#                     period=self.period, bar=bar, use_wicks=self.use_wicks
-#                 )
-#             if self.bos_positive:
-#                 secondary_event = self.bos_positive.handle_bar(bar)
-
-#         if main_event == BosEvent.CHOCH:
-#             self.main_side = OrderSide.BUY if self.main_side == OrderSide.SELL else OrderSide.SELL
-#             secondary_event = BosEvent.NONE
-#         elif (
-#             self.bos_negative
-#             and main_event in [BosEvent.BOS, BosEvent.MSS]
-#             and self.main_side == OrderSide.BUY
-#         ):
-#             self.bos_negative = None
-#         elif (
-#             self.bos_positive
-#             and main_event in [BosEvent.BOS, BosEvent.MSS]
-#             and self.main_side == OrderSide.SELL
-#         ):
-#             self.bos_positive = None
-#         return main_event, secondary_event
 
 
 class ChangeOfCharacterDetectorV2Config(ActorConfig, frozen=True):
@@ -324,30 +264,47 @@ class ChangeOfCharacterDetectorV2(Actor):
         client_id = self.config.client_id
         requests_start = self.clock.utc_now() - pd.Timedelta(minutes=1440 * 3)
 
-        uuids: tuple[UUID4] = ()
-        for instrument_id in self.config.instrument_ids or []:
-            bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
-            self._bos[instrument_id] = BosIndicator(
-                period=self.config.bos_period, use_wicks=self.config.use_wicks
-            )
+        if "INTERNAL" in self.config.bar_type_spec:
+            aggregated_bar_types = set()
+            for instrument_id in self.config.instrument_ids or []:
+                bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
+                self._bos[instrument_id] = BosIndicator(
+                    period=self.config.bos_period, use_wicks=self.config.use_wicks
+                )
+                aggregated_bar_types.add(bar_type)
 
-            uuid = UUID4()
-            self.request_bars(
-                bar_type=bar_type,
+            self.request_aggregated_bars(
+                bar_types=list(aggregated_bar_types),
                 start=requests_start,
                 client_id=client_id,
-                request_id=uuid,
-                join_request=True,
-            )
-            uuids += (uuid,)
-
-        if uuids:
-            self.request_join(
-                request_ids=uuids,
-                start=requests_start,
-                client_id=client_id,
+                update_subscriptions=True,
                 callback=self.on_start_finished,
             )
+        else:
+            uuids: tuple[UUID4] = ()
+            for instrument_id in self.config.instrument_ids or []:
+                bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
+                self._bos[instrument_id] = BosIndicator(
+                    period=self.config.bos_period, use_wicks=self.config.use_wicks
+                )
+
+                uuid = UUID4()
+                self.request_bars(
+                    bar_type=bar_type,
+                    start=requests_start,
+                    client_id=client_id,
+                    request_id=uuid,
+                    join_request=True,
+                )
+                uuids += (uuid,)
+
+            if uuids:
+                self.request_join(
+                    request_ids=uuids,
+                    start=requests_start,
+                    client_id=client_id,
+                    callback=self.on_start_finished,
+                )
 
     def on_start_finished(self, uuid: UUID4) -> None:
         for instrument_id in self.config.instrument_ids or []:
@@ -361,6 +318,10 @@ class ChangeOfCharacterDetectorV2(Actor):
             bar_type = BarType.from_str(f"{instrument_id.value}-{self.config.bar_type_spec}")
             self.unsubscribe_bars(bar_type=bar_type, client_id=client_id)
 
+    def on_historical_data(self, data):
+        if isinstance(data, Bar):
+            self.on_bar(data)
+
     def on_bar(self, bar: Bar) -> None:
         instrument_id = bar.bar_type.instrument_id
         if instrument_id not in self._bos:
@@ -370,14 +331,14 @@ class ChangeOfCharacterDetectorV2(Actor):
 
         if bos.choc_triggered:
             bar_prev = self.cache.bar(bar.bar_type, bos.choc_triggered_duration)
-            data = BosLine(
+            data = ChocLine(
                 instrument_id=instrument_id,
                 open_datetime=bar_prev.ts_event,
                 close_datetime=bar.ts_event,
                 price=bos.choc_triggered_price,
                 color="#C3DB38",
             )
-            self.publish_data(DataType(BosLine), data)
+            self.publish_data(DataType(ChocLine), data)
 
             if bos.bos_duration:
                 bar_mss = self.cache.bar(bar.bar_type, bos.bos_duration[-1])
@@ -401,10 +362,20 @@ class ChangeOfCharacterDetectorV2(Actor):
             )
             self.publish_data(DataType(BosLine), data)
 
+            if len(bos.bos) == 1 and bos.choc_triggered_price:
+                data = BosWithoutMssPattern(
+                    instrument_id=instrument_id,
+                    datetime=bar.ts_event,
+                    color="#BFF347" if bos.direction > 0 else "#BFF34777",
+                )
+                self.publish_data(DataType(BosWithoutMssPattern), data)
+
             if len(bos.bos) == 2:
                 mss = bos.bos[1]
-                choc = bos.choc_triggered_price
                 bos1 = bos.bos[0]
+                choc = bos.choc_triggered_price
+                if not choc:
+                    return
                 if (
                     bos.direction > 0
                     and mss < choc
@@ -413,9 +384,9 @@ class ChangeOfCharacterDetectorV2(Actor):
                     and mss > choc
                     and choc > bos1
                 ):
-                    data = BosVLine(
+                    data = BosPerfectPattern(
                         instrument_id=instrument_id,
                         datetime=bar.ts_event,
-                        color="#E933DA",
+                        color="#6892EC" if bos.direction > 0 else "#6892EC77",
                     )
-                    self.publish_data(DataType(BosVLine), data)
+                    self.publish_data(DataType(BosPerfectPattern), data)

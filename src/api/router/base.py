@@ -144,7 +144,7 @@ class BaseRouter:
         limit = limit or 500
         # find bar type
         bar_type = self.find_bar_type(instrument_id=instrument_id, bar_spec=bar_spec)
-        if bar_type.is_externally_aggregated():
+        if not bar_type.is_composite():
             # filter cache bars by before date and then apply limit
             bars = [b for b in self.cache.bars(bar_type=bar_type) if start <= b.ts_event < end][
                 :limit

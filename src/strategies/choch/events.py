@@ -48,7 +48,7 @@ class OpenMarketData(Data):
 
 
 @customdataclass
-class ClosedMarketData(Data):
+class __ClosedMarketData(Data):
     instrument_id: InstrumentId
     market: str
     high_price: float
@@ -68,7 +68,7 @@ class ClosedMarketData(Data):
             instrument_id=str(self.instrument_id),
             tool=DrawingTool.RECTANGLE,
             points=[DrawingPoint(**p) for p in points],
-            style=DrawingStyle(color="#00000000", fill=f"{self.color}11"),
+            style=DrawingStyle(color="#00000000", fill=f"{self.color}22"),
         )
 
 
@@ -90,12 +90,34 @@ class BosLine(Data):
             instrument_id=str(self.instrument_id),
             tool=DrawingTool.LINE,
             points=[DrawingPoint(**p) for p in points],
-            style=DrawingStyle(color=self.color, width=1, dashed=True),
+            style=DrawingStyle(color=self.color, width=0.5, dashed=True),
         )
 
 
 @customdataclass
-class BosVLine(Data):
+class ChocLine(Data):
+    instrument_id: InstrumentId
+    open_datetime: int
+    close_datetime: int
+    price: float
+    color: str = "#3051E2"
+
+    def to_drawing(self) -> Drawing:
+        points = [
+            {"time": self.open_datetime // 10**9, "price": self.price},
+            {"time": self.close_datetime // 10**9, "price": self.price},
+        ]
+        return Drawing(
+            id=str(UUID4()),
+            instrument_id=str(self.instrument_id),
+            tool=DrawingTool.LINE,
+            points=[DrawingPoint(**p) for p in points],
+            style=DrawingStyle(color=self.color, width=0.5, dashed=True),
+        )
+
+
+@customdataclass
+class BosPerfectPattern(Data):
     instrument_id: InstrumentId
     datetime: int
     color: str = "#3051E2"
@@ -109,7 +131,26 @@ class BosVLine(Data):
             instrument_id=str(self.instrument_id),
             tool=DrawingTool.VLINE,
             points=[DrawingPoint(**p) for p in points],
-            style=DrawingStyle(color=self.color, width=1),
+            style=DrawingStyle(color=self.color, width=0.5, dashed=True),
+        )
+
+
+@customdataclass
+class BosWithoutMssPattern(Data):
+    instrument_id: InstrumentId
+    datetime: int
+    color: str = "#3051E2"
+
+    def to_drawing(self) -> Drawing:
+        points = [
+            {"time": self.datetime // 10**9, "price": 0},
+        ]
+        return Drawing(
+            id=str(UUID4()),
+            instrument_id=str(self.instrument_id),
+            tool=DrawingTool.VLINE,
+            points=[DrawingPoint(**p) for p in points],
+            style=DrawingStyle(color=self.color, width=0.5, dashed=True),
         )
 
 

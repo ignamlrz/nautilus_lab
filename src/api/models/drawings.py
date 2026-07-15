@@ -23,7 +23,7 @@ class DrawingPoint(BaseModel):
 
 class DrawingStyle(BaseModel):
     color: str = "#3051E2"
-    width: int = 2
+    width: float = 2
     dashed: bool = False
     fill: str | None = None
 
