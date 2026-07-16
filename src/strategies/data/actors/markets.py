@@ -5,6 +5,8 @@ from collections import OrderedDict
 from collections import deque
 from dataclasses import dataclass
 from dataclasses import field
+from enum import Enum
+from enum import unique
 
 import pandas as pd
 from nautilus_trader.common.actor import Actor
@@ -30,6 +32,14 @@ from src.strategies.data.events import NewSessionLowData
 BLACKOUT_WINDOW = "BLACKOUT_WINDOW"
 
 
+@unique
+class MarketBreakType(Enum):
+    """Tipos de señal de mercado."""
+
+    PRINCIPAL = "principal"
+    SECONDARY = "secondary"
+
+
 class MarketInfoActorConfig(ActorConfig, frozen=True):
     """
     Configuration for ``MarketInfoActor`` instances.
@@ -38,6 +48,7 @@ class MarketInfoActorConfig(ActorConfig, frozen=True):
     tz: str
     open_time_hour: int
     open_time_minute: int
+    break_type: MarketBreakType = MarketBreakType.PRINCIPAL
     color: str = "#3A74A3"
 
     def start_abs_minutes(self) -> int:
@@ -61,7 +72,7 @@ class MarketBlackoutWindowConfig(ActorConfig, frozen=True):
     end_hour: int
     end_minute: int
     tz: str = "America/New_York"
-    color: str = "#1F1F1F"  # gris oscuro por defecto para diferenciar del color del market
+    color: str = "#5E5E5E"  # gris oscuro por defecto para diferenciar del color del market
 
     def start_abs_minutes(self) -> int:
         """Minutos desde el lunes 00:00 — para comparar entre días."""
@@ -99,7 +110,7 @@ class MarketsActorConfig(ActorConfig, frozen=True):
     client_id: ClientId | None = None
     log_session_changed: bool = False
     log_session_high_low: bool = False
-    log_break_above_below: bool = False
+    log_break_above_below: bool = True
     log_broken_both_above_below: bool = False
 
 
@@ -246,6 +257,8 @@ class MarketsActor(Actor):
         """Return the markets that are open today."""
         date = unix_nanos_to_dt(timestamp)
         yesterday = date - pd.Timedelta(days=1)
+        tomorrow = date + pd.Timedelta(days=1)
+        post_tomorrow = date + pd.Timedelta(days=2)
         markets_open: dict[int, str] = {}
 
         blackout_window = self.config.blackout_window
@@ -256,14 +269,23 @@ class MarketsActor(Actor):
             max_blackout_end = blackout_window.close_time_utc(date)
             markets_open[dt_to_unix_nanos(min_blackout_start)] = BLACKOUT_WINDOW
 
-        for market, config in self.config.markets.items():
-            open_time = config.open_time_utc(date)
-            if open_time < min_blackout_start or open_time >= max_blackout_end:
-                markets_open[dt_to_unix_nanos(open_time)] = market
-            open_time_yesterday = config.open_time_utc(yesterday)
-            if open_time_yesterday < min_blackout_start or open_time_yesterday >= max_blackout_end:
-                markets_open[dt_to_unix_nanos(open_time_yesterday)] = market
+        max_market_open_time_after_blackout = pd.Timestamp.min.tz_localize("UTC")
+        max_market_open_time = None
+        for d in [yesterday, date, tomorrow, post_tomorrow]:
+            for market, config in self.config.markets.items():
+                open_time = config.open_time_utc(d)
+                if open_time < min_blackout_start or open_time >= max_blackout_end:
+                    markets_open[dt_to_unix_nanos(open_time)] = market
+                elif (
+                    open_time > max_market_open_time_after_blackout
+                    and open_time >= min_blackout_start
+                    and open_time < max_blackout_end
+                ):
+                    max_market_open_time_after_blackout = open_time
+                    max_market_open_time = market
 
+        if dt_to_unix_nanos(max_blackout_end) not in markets_open:
+            markets_open[dt_to_unix_nanos(max_blackout_end)] = max_market_open_time
         return OrderedDict(sorted(markets_open.items()))
 
     def _process_bar(
@@ -389,15 +411,36 @@ class MarketsActor(Actor):
             close_datetime=dt_to_unix_nanos(market_data.close_datetime)
             if market_data.close_datetime
             else close_time,
-            color=self.config.markets[market_data.name].color
-            if market_data.name in self.config.markets
-            else "#3051E2",
+            color=self._get_safe_config(market_data.name).color,
         )
         self.publish_data(DataType(ClosedMarketData), data)
 
     def _publish_market_break_above_data(
         self, instrument_id: InstrumentId, market_data: MarketData, closed_market_data: MarketData
     ) -> None:
+        if market_data.name == BLACKOUT_WINDOW:
+            return
+        session_break_type = self._get_safe_config(market_data.name).break_type
+        closed_break_type = self._get_safe_config(closed_market_data.name).break_type
+        if (
+            session_break_type == MarketBreakType.SECONDARY
+            and closed_break_type == MarketBreakType.SECONDARY
+            and closed_market_data.name != BLACKOUT_WINDOW
+        ):
+            return
+        elif closed_break_type == MarketBreakType.SECONDARY:
+            if not closed_market_data.markets_breaked_above:
+                return
+            allow_publish = False
+            for md in closed_market_data.markets_breaked_above:
+                if (
+                    self._get_safe_config(md.name).break_type == MarketBreakType.PRINCIPAL
+                    or md.name == BLACKOUT_WINDOW
+                ):
+                    allow_publish = True
+                    break
+            if not allow_publish:
+                return
         data = MarketBreakAboveData(
             instrument_id=instrument_id,
             market=market_data.name,
@@ -420,6 +463,29 @@ class MarketsActor(Actor):
     def _publish_market_break_below_data(
         self, instrument_id: InstrumentId, market_data: MarketData, closed_market_data: MarketData
     ) -> None:
+        if market_data.name == BLACKOUT_WINDOW:
+            return
+        session_break_type = self._get_safe_config(market_data.name).break_type
+        closed_break_type = self._get_safe_config(closed_market_data.name).break_type
+        if (
+            session_break_type == MarketBreakType.SECONDARY
+            and closed_break_type == MarketBreakType.SECONDARY
+            and closed_market_data.name != BLACKOUT_WINDOW
+        ):
+            return
+        if closed_break_type == MarketBreakType.SECONDARY:
+            if not closed_market_data.markets_breaked_below:
+                return
+            allow_publish = False
+            for md in closed_market_data.markets_breaked_below:
+                if (
+                    self._get_safe_config(md.name).break_type == MarketBreakType.PRINCIPAL
+                    or md.name == BLACKOUT_WINDOW
+                ):
+                    allow_publish = True
+                    break
+            if not allow_publish:
+                return
         data = MarketBreakBelowData(
             instrument_id=instrument_id,
             market=market_data.name,
@@ -471,3 +537,15 @@ class MarketsActor(Actor):
             self.log.info(
                 f"{instrument_id} -> New low price for market {data.market}: {data.price} @ {unix_nanos_to_dt(data.ts_event)}"
             )
+
+    def _get_safe_config(self, market: str) -> MarketInfoActorConfig:
+        return self.config.markets.get(
+            market,
+            MarketInfoActorConfig(
+                tz=self.config.blackout_window.tz,
+                open_time_hour=self.config.blackout_window.start_hour,
+                open_time_minute=self.config.blackout_window.start_minute,
+                break_type=MarketBreakType.SECONDARY,
+                color=self.config.blackout_window.color,
+            ),
+        )

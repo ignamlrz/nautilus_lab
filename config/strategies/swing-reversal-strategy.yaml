@@ -30,6 +30,7 @@ actors:
           tz: America/New_York
           open_time_hour: 8
           open_time_minute: 30
+          break_type: secondary
           color: "#F8C471"
         NY:
           tz: America/New_York
@@ -40,13 +41,14 @@ actors:
           tz: America/New_York
           open_time_hour: 16
           open_time_minute: 0
+          break_type: secondary
           color: "#CA6F1E"
       blackout_window:
         start_weekday: 4
         start_hour: 16
         start_minute: 0
         end_weekday: 6
-        end_hour: 16
+        end_hour: 18
         end_minute: 0
   - actor_path: src.strategies.data.actors.bars_sync:BarSyncronizerActor
     config_path: src.strategies.data.actors.bars_sync:BarSyncronizerActorConfig

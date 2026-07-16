@@ -24,7 +24,7 @@ class SwingBosReversalStrategyConfig(StrategyConfig, frozen=True):
 
     bar_type_timedelta: pd.Timedelta
     client_id: ClientId | None = None
-    period: PositiveInt = 60
+    period: PositiveInt = 30
     log_data: bool = True
 
 
@@ -93,7 +93,8 @@ class SwingBosReversalStrategy(Strategy):
         self._markets_broken[data.instrument_id] = data
 
     def on_closed_market(self, data: ClosedMarketData) -> None:
-        self._markets_broken[data.instrument_id] = None
+        pass
+        # self._markets_broken[data.instrument_id] = None
 
     def _process_bar(self, data: HistoricalBarData | LiveBarData) -> None:
         if self.config.bar_type_timedelta != data.bar_type.spec.timedelta:
