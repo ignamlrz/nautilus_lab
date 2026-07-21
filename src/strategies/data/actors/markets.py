@@ -190,6 +190,38 @@ class MarketData:
 
         return both_breaked
 
+    def recursive_markets_breaked_above(self) -> int:
+        result = self._recursive_markets_breaked_above()
+        if result < 0.1:
+            return 0
+        return result
+
+    def _recursive_markets_breaked_above(self, depth=0) -> int:
+        counter = 0
+        for m in self.markets_breaked_above:
+            n_days = (self.open_datetime - m.open_datetime) / pd.Timedelta(days=1)
+            if n_days < 1:
+                continue
+            weight = math.exp(-0.618 * n_days)
+            counter += weight + weight * m._recursive_markets_breaked_above(depth=depth + 1)
+        return counter
+
+    def recursive_markets_breaked_below(self) -> int:
+        result = self._recursive_markets_breaked_below()
+        if result < 0.1:
+            return 0
+        return result
+
+    def _recursive_markets_breaked_below(self, depth=0) -> int:
+        counter = 0
+        for m in self.markets_breaked_below:
+            n_days = (self.open_datetime - m.open_datetime) / pd.Timedelta(days=1)
+            if n_days < 1:
+                continue
+            weight = math.exp(-0.618 * n_days)
+            counter += weight + weight * m._recursive_markets_breaked_below(depth=depth + 1)
+        return counter
+
     def _maxmin_price(self, bar: Bar) -> tuple[float, float]:
         return maxmin_price(bar=bar, use_wicks=self.use_wicks)
 
@@ -302,7 +334,7 @@ class MarketsActor(Actor):
         if bar.ts_event > self._next_epoch_recalculate_market[instrument_id]:
             markets_open = self._calc_markets_open(bar.ts_event)
             self._markets_open[instrument_id] = markets_open
-            self._next_epoch_recalculate_market[instrument_id] = list(markets_open.keys())[-2]
+            self._next_epoch_recalculate_market[instrument_id] = list(markets_open.keys())[-6]
 
         ts_open, current_market = self._find_current_market(
             self._markets_open[instrument_id], bar.ts_event
@@ -402,11 +434,15 @@ class MarketsActor(Actor):
     def _publish_closed_market_data(
         self, instrument_id: InstrumentId, market_data: MarketData, close_time: int | None = None
     ) -> None:
+        recursive_markets_breaked_above = market_data.recursive_markets_breaked_above()
+        recursive_markets_breaked_below = market_data.recursive_markets_breaked_below()
         data = ClosedMarketData(
             instrument_id=instrument_id,
             market=market_data.name,
             high_price=market_data.session_high_price,
             low_price=market_data.session_low_price,
+            recursive_markets_breaked_above=recursive_markets_breaked_above,
+            recursive_markets_breaked_below=recursive_markets_breaked_below,
             open_datetime=dt_to_unix_nanos(market_data.open_datetime),
             close_datetime=dt_to_unix_nanos(market_data.close_datetime)
             if market_data.close_datetime
@@ -441,14 +477,17 @@ class MarketsActor(Actor):
                     break
             if not allow_publish:
                 return
+        recursive_markets_breaked_above = market_data.recursive_markets_breaked_above()
         data = MarketBreakAboveData(
             instrument_id=instrument_id,
+            is_principal=session_break_type == MarketBreakType.PRINCIPAL,
             market=market_data.name,
             session_high_price=market_data.session_high_price,
             session_low_price=market_data.session_low_price,
             markets_rebased_on_session=",".join(
                 [m.name for m in market_data.markets_breaked_above]
             ),
+            recursive_markets_breaked_on_session=recursive_markets_breaked_above,
             price_market_rebased=closed_market_data.session_high_price,
             ts_market_rebased=dt_to_unix_nanos(closed_market_data.open_datetime),
             ts_init=dt_to_unix_nanos(market_data.open_datetime),
@@ -486,8 +525,10 @@ class MarketsActor(Actor):
                     break
             if not allow_publish:
                 return
+        recursive_markets_breaked_below = market_data.recursive_markets_breaked_below()
         data = MarketBreakBelowData(
             instrument_id=instrument_id,
+            is_principal=session_break_type == MarketBreakType.PRINCIPAL,
             market=market_data.name,
             session_high_price=market_data.session_high_price,
             session_low_price=market_data.session_low_price,
@@ -496,6 +537,7 @@ class MarketsActor(Actor):
             ),
             price_market_rebased=closed_market_data.session_low_price,
             ts_market_rebased=dt_to_unix_nanos(closed_market_data.open_datetime),
+            recursive_markets_breaked_on_session=recursive_markets_breaked_below,
             ts_init=dt_to_unix_nanos(market_data.open_datetime),
             ts_event=dt_to_unix_nanos(market_data.session_low_datetime),
         )

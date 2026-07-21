@@ -34,3 +34,23 @@ class SwingsData(Data):
             points=points,
             style=DrawingStyle(color="#2F9147" if order_side == OrderSide.BUY else "#A03030"),
         )
+
+
+@customdataclass
+class RecursiveMarketBreakData(Data):
+    instrument_id: InstrumentId
+    market: str
+    color: str
+
+    def to_drawing(self) -> Drawing:
+        points = [
+            {"time": self.ts_init // 10**9, "price": 0},
+            {"time": self.ts_event // 10**9, "price": 0},
+        ]
+        return Drawing(
+            id=str(UUID4()),
+            instrument_id=str(self.instrument_id),
+            tool=DrawingTool.DATE_RANGE,
+            points=points,
+            style=DrawingStyle(color=self.color, fill=f"{self.color}22"),
+        )

@@ -1,18 +1,17 @@
 strategies:
-  - strategy_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategy
-    config_path: src.strategies.swing_bos.reversal_strategy:SwingBosReversalStrategyConfig
+  - strategy_path: src.strategies.swing_bos.choc_ob_strategy:ChocOBStrategy
+    config_path: src.strategies.swing_bos.choc_ob_strategy:ChocOBStrategyConfig
     config:
-      client_id: swing-reversal-strategy
-      bar_type_timedelta: 1m
-      log_commands: False
-      log_events: False
+      client_id: break-market-detector
+      timedelta_choc: 1m
+      timedelta_highlows: 5m
 actors:
   - actor_path: src.strategies.data.actors.markets:MarketsActor
     config_path: src.strategies.data.actors.markets:MarketsActorConfig
     config:
       client_id: markets-actor
-      bar_type_historical: 30-MINUTE-LAST-INTERNAL
-      bar_type_live: 5-MINUTE-LAST-INTERNAL
+      bar_type_historical: 5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL
+      bar_type_live: 1-MINUTE-LAST-EXTERNAL
       markets_data_history: 100
       use_wicks: True
       markets:
@@ -57,14 +56,13 @@ actors:
       bar_type_specs:
         - 1-MINUTE-LAST-EXTERNAL
         - 5-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL
-        - 30-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL
       instrument_ids:
         # crypto
         - BTCUSDT-PERP.BINANCE_FUTURES
-        - XRPUSDT-PERP.BINANCE_FUTURES
+        # - XRPUSDT-PERP.BINANCE_FUTURES
         # metals
-        - XAGUSDT-PERP.BINANCE_FUTURES
-      historical_data_timedelta: 1d
+        # - XAGUSDT-PERP.BINANCE_FUTURES
+      historical_data_num_bars: 100
       log_data: False
   - actor_path: src.strategies.data.actors.telegram:TelegramActor
     config_path: src.strategies.data.actors.telegram:TelegramActorConfig

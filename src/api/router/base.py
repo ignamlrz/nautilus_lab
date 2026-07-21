@@ -16,6 +16,7 @@ from src.api.keys import NAUTILUS_TRADER_KEY
 
 
 ALLOWED_TIMEFRAME_TO_BAR_SPEC = {
+    "10s": BarSpecification.from_str("10-SECOND-LAST"),
     "1m": BarSpecification.from_str("1-MINUTE-LAST"),
     "5m": BarSpecification.from_str("5-MINUTE-LAST"),
     "15m": BarSpecification.from_str("15-MINUTE-LAST"),
@@ -57,7 +58,7 @@ class BaseRouter:
     def agent(self):
         from src.api.server.agent import ServerAgentActor
 
-        actor = self.nautilus_app.kernel.trader.actors()[-1]
+        actor = self.nautilus_app.kernel.trader.actors()[0]
         if isinstance(actor, ServerAgentActor):
             return actor
         return None

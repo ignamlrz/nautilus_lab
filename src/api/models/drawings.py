@@ -12,6 +12,7 @@ class DrawingTool(StrEnum):
     VLINE = "VerticalLine"
     HLINE = "HorizontalLine"
     RECTANGLE = "Rectangle"
+    DATE_RANGE = "DateRange"
 
 
 class DrawingPoint(BaseModel):
@@ -26,6 +27,7 @@ class DrawingStyle(BaseModel):
     width: float = 2
     dashed: bool = False
     fill: str | None = None
+    text: str | None = None
 
 
 class Drawing(BaseModel):

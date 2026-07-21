@@ -54,7 +54,7 @@ actors:
         - BTCUSDT-PERP.BINANCE_FUTURES
         - XRPUSDT-PERP.BINANCE_FUTURES
         # metals
-        - XAGUSDT-PERP.BINANCE_FUTURES
+        # - XAGUSDT-PERP.BINANCE_FUTURES
       historical_data_timedelta: 1d
       log_data: False
   - actor_path: src.strategies.data.actors.telegram:TelegramActor

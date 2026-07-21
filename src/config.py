@@ -46,12 +46,12 @@ def build_config(data: Any) -> Any:
             config=data["server"],
         ).dict()
         if data["type"] == "live":
-            data["config"]["actors"] = data["config"].get("actors", []) + [
-                server_agent_actor_config
-            ]
+            data["config"]["actors"] = [server_agent_actor_config] + data["config"].get(
+                "actors", []
+            )
         elif data["type"] == "backtest":
             engine_config = data["config"]["engine"]["config"]
-            engine_config["actors"] = engine_config.get("actors", []) + [server_agent_actor_config]
+            engine_config["actors"] = [server_agent_actor_config] + engine_config.get("actors", [])
     return build_property(data["config"])
 
 

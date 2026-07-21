@@ -3,16 +3,19 @@ server:
   enabled: true
   port: 8080
   drawings:
+    # indicators
+    - src.indicators.choc.events:BosLine
+    - src.indicators.choc.events:ChocLine
+    # - src.indicators.choc.events:BosWithoutMssPattern
+    # - src.indicators.choc.events:BosPerfectPattern
+    # strategies
     - src.strategies.data.events:ClosedMarketData
     # - src.strategies.choch.events:SwingData
-    # - src.strategies.choch.events:BosLine
-    # - src.strategies.choch.events:ChocLine
-    # - src.strategies.choch.events:BosWithoutMssPattern
-    # - src.strategies.choch.events:BosPerfectPattern
-    - src.strategies.swing_bos.events:SwingsData
+    # - src.strategies.swing_bos.events:SwingsData
+    # - src.strategies.swing_bos.events:RecursiveMarketBreakData
 config:
-  start: "2026-03-29T00:00:00"
-  end: "2026-04-15T00:00:00"
+  start: "2026-02-01T00:00:00"
+  end: "2026-02-28T00:00:00"
   # backtest engine configuration
   engine:
     config_path: nautilus_trader.backtest.config:BacktestEngineConfig
